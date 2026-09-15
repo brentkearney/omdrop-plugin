@@ -218,10 +218,7 @@ Panel {
     if (!receiving) return "Nearby Apple devices cannot see this computer."
     if (visibility === 0) return "The receiver is up, but nothing is advertising on the radio."
     if (visibility === -1) return "Cannot tell whether anyone can see us."
-    // The band note is a footnote to being visible, not a replacement for it:
-    // as its own branch it hid the name from everyone whose Wi-Fi we moved.
-    return bandHeld ? visibleText + " Wi-Fi is on 2.4 GHz until you turn Omdrop off."
-                    : visibleText
+    return visibleText
   }
 
   // The row that set the window becomes the row that reports it: while a timed
