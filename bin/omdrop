@@ -529,6 +529,13 @@ print(json.dumps({"ready": not rows,
 # than pkexec'ing a build script out of a plugin clone, which would be root
 # running user-writable code. makepkg refuses to run as root anyway.
 DRIVER_REPO=https://github.com/brentkearney/omdrop-awdl.git
+# The exact driver commit this release of the plugin builds. A branch name
+# would let the built source drift away from what anyone reviewed -- including
+# the marketplace, whose baseline refuses an unpinned remote build -- so the
+# checkout below is detached at this SHA and the build only runs if it
+# succeeded. Bump it, in the same commit, whenever the plugin needs a newer
+# driver: the full 40 characters, because a short SHA is not a pin.
+DRIVER_COMMIT=2d565b804e3ff6efe8e1b69fa1ff5e8001b360f6
 cmd_install_driver() {
   if [[ -x "$DISCOVERABLE" ]] && opendrop_installed; then
     echo "The driver and the AirDrop support library are both installed. Nothing to do."
@@ -568,12 +575,12 @@ echo 'This also needs the AUR package: opendrop. Install it with your AUR helper
     build="$build
 mkdir -p \"\$(dirname '$src')\"
 if [ -d '$src/.git' ]; then
-  git -C '$src' pull --ff-only
+  git -C '$src' fetch --quiet origin
 else
-  git clone $DRIVER_REPO '$src'
+  git clone --quiet $DRIVER_REPO '$src'
 fi
-cd '$src'
-makepkg -si"
+echo 'Building driver commit $DRIVER_COMMIT'
+git -C '$src' checkout --detach 2d565b804e3ff6efe8e1b69fa1ff5e8001b360f6 && makepkg --dir '$src' -si"
   fi
   if ! command -v omarchy-launch-floating-terminal-with-presentation >/dev/null 2>&1; then
     echo "Omdrop requires a patched wifi driver, which requires administrative privilege to install. You will be prompted for your password."
