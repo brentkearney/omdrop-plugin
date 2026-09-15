@@ -705,6 +705,15 @@ cmd_off() {
   # so this is a no-op otherwise -- and it has to run even when the stops above
   # failed, or the user stays pinned to 2.4 GHz.
   band_restore
+  # band_restore reassociates, and avahi re-announces once the link is back --
+  # which is exactly when it can rename itself over an echo of its own record
+  # and leave this host unreachable by name. The helper's stop already put back
+  # a name that had drifted by then; this covers the drift that happens after
+  # it exited. Detached and bounded: `off` must not wait on the radio settling.
+  if [[ -x "$DISCOVERABLE" ]]; then
+    setsid pkexec "$DISCOVERABLE" mdns-reclaim 40 >/dev/null 2>&1 &
+    disown
+  fi
   cmd_status
 }
 
