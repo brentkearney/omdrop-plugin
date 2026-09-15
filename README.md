@@ -7,9 +7,9 @@ https://github.com/user-attachments/assets/3e415609-6e25-48b0-b55f-58252c65356b
 Depends on a [patched wifi driver](https://github.com/brentkearney/omdrop-awdl), which the plugin offers to install on first use.
 
 Provides an Omarchy toolbar menu that:
-- Turns receiving mode on/off
-- Sets the name of your device, as it appears to 
-- Sets the file download location
+- Toggles receiving mode on/off
+- Sets the name of your device, as it appears to AirDrop users
+- Sets the file download location (defaults to ~/Downloads)
 
 Notification pops up when a file is received. JPEG or txt files get automatically copied to clipboard. Clicking the notification popup opens the file with the default app for the file type.
 
