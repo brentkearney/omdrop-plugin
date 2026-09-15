@@ -535,7 +535,7 @@ DRIVER_REPO=https://github.com/brentkearney/omdrop-awdl.git
 # checkout below is detached at this SHA and the build only runs if it
 # succeeded. Bump it, in the same commit, whenever the plugin needs a newer
 # driver: the full 40 characters, because a short SHA is not a pin.
-DRIVER_COMMIT=2d565b804e3ff6efe8e1b69fa1ff5e8001b360f6
+DRIVER_COMMIT=0a7303da01757f7bdfa91be13b2b69b2c4d3b7fd
 cmd_install_driver() {
   if [[ -x "$DISCOVERABLE" ]] && opendrop_installed; then
     echo "The driver and the AirDrop support library are both installed. Nothing to do."
@@ -580,7 +580,7 @@ else
   git clone --quiet $DRIVER_REPO '$src'
 fi
 echo 'Building driver commit $DRIVER_COMMIT'
-git -C '$src' checkout --detach 2d565b804e3ff6efe8e1b69fa1ff5e8001b360f6 && makepkg --dir '$src' -si"
+git -C '$src' checkout --detach 0a7303da01757f7bdfa91be13b2b69b2c4d3b7fd && makepkg --dir '$src' -si"
   fi
   if ! command -v omarchy-launch-floating-terminal-with-presentation >/dev/null 2>&1; then
     echo "Omdrop requires a patched wifi driver, which requires administrative privilege to install. You will be prompted for your password."
