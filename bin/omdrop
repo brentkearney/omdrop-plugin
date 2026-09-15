@@ -1,0 +1,982 @@
+#!/usr/bin/env bash
+# omdrop -- receive files from nearby Apple devices.
+#
+# "omdrop" is this project's name for the feature. The protocol it speaks is
+# Apple's, and its wire identifiers are not ours to rename: the mDNS service
+# type really is _airdrop._tcp, the endpoints really are /Discover, /Ask and
+# /Upload, and the receiver's config key really is ReceiverComputerName. So
+# everything below the user-facing surface still says airdrop, deliberately --
+# airdrop-serve.py, airdrop-receiver.service and ~/.config/airdrop/config.toml
+# are protocol- and service-layer names, not product ones.
+#
+# This command owns the two knobs that do not belong in the network panel: how
+# long the receive window stays open, and the name the sheet draws under our
+# tile.
+#
+# The panel's parachute button is a toggle and nothing more (design:
+# design/airdrop/). It shells out to `omdrop toggle` and reads
+# `omdrop status --json`; everything with an argument lives here.
+#
+# This wraps what already exists rather than inventing state:
+#   receiving on/off   systemctl --user airdrop-receiver.service
+#   the window         a transient systemd timer that stops that unit
+#   name / model       ~/.config/airdrop/config.toml, read by airdrop-serve.py
+# There is no daemon of our own and no state file. `status` asks systemd, so
+# it stays right when the service dies, the timer fires, or someone runs
+# systemctl by hand.
+#
+# The receiver validates config.toml and refuses to start on a bad value --
+# that is deliberate (airdrop-serve.py:44). The check in `name` below is a
+# courtesy so a typo fails here with a readable message instead of at the next
+# start; the receiver remains the gate, and a set that the receiver rejects is
+# rolled back.
+#
+# Install:  ln -s "$PWD/tools/omdrop" ~/.local/bin/omdrop
+# The unit itself is not enabled by default; see the header of
+# packaging/systemd/airdrop-receiver.service.
+set -uo pipefail
+
+UNIT=airdrop-receiver.service
+WINDOW=omdrop-window           # transient .timer that closes the window
+CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/airdrop/config.toml"
+SELF="$(readlink -f "$0")"
+PROJ="$(cd "$(dirname "$SELF")/.." && pwd)"
+
+# The version a bug report needs. manifest.json is the single source of truth
+# -- the marketplace reads it, so a constant here would be a second one, free
+# to drift. $0 rather than $SELF: the plugin's bin/omdrop is a symlink to a
+# source checkout during development, and resolving it lands next to the
+# script instead of next to the manifest that shipped it.
+VERSION_FALLBACK=0.1.0
+omdrop_version() {
+  local dir manifest version=
+  dir=$(cd "$(dirname "$0")/.." 2>/dev/null && pwd) || dir=
+  manifest="$dir/manifest.json"
+  [[ -n "$dir" && -r "$manifest" ]] \
+    && version=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest" | head -1)
+  printf '%s\n' "${version:-$VERSION_FALLBACK}"
+}
+
+# The radio half: makes us discoverable to Everyone (AWDL _airdrop
+# announcements + the BLE wake advert). Owned by the driver side; this CLI
+# only calls it. Absent = the receiver still runs and still accepts a transfer
+# from a peer that already knows us, but nobody's sheet will show a tile --
+# so `on` says that out loud rather than reporting a success it cannot back up.
+# Found in this order: an explicit override, anything on PATH, then the
+# sibling tools/ directory of a source checkout. The plugin ships this script
+# but not the radio half, so "next to me" is exactly where it will not be.
+DISCOVERABLE="${OMDROP_DISCOVERABLE:-}"
+# The packaged location first: root-owned, covered by the polkit action, and
+# the only arrangement fit to ship. A source checkout falls through to PATH.
+[[ -n "$DISCOVERABLE" || ! -x /usr/lib/omdrop/omdrop-discoverable ]] \
+  || DISCOVERABLE=/usr/lib/omdrop/omdrop-discoverable
+if [[ -z "$DISCOVERABLE" ]]; then
+  DISCOVERABLE=$(command -v awdl-discoverable 2>/dev/null || true)
+fi
+[[ -n "$DISCOVERABLE" ]] || DISCOVERABLE="$PROJ/tools/awdl-discoverable"
+# Resolve symlinks: the helper re-execs itself under pkexec using $0, and the
+# polkit rule matches on the real script path. Invoked through a ~/.local/bin
+# symlink it would ask for a password every single time.
+[[ -e "$DISCOVERABLE" ]] && DISCOVERABLE=$(readlink -f "$DISCOVERABLE")
+
+# Being visible to Everyone is not a state to leave on by accident, so `on`
+# is bounded unless you say otherwise. Ten minutes is what iOS uses.
+DEFAULT_WINDOW=10m
+
+# The one-shot watcher: a transient .path unit on the download folder that
+# turns us off as soon as a file lands. PathModified fires on any change to
+# that directory, so an unrelated download can also close the window early --
+# which is the safe direction to be wrong in.
+ONCE=omdrop-once
+WATCH=omdrop-watch
+
+# omdrop's own settings live apart from the receiver's config.toml on purpose:
+# airdrop-serve.py validates that file against a fixed key list and refuses to
+# start on anything it does not recognise, so adding our keys there would stop
+# the receiver dead.
+SETTINGS="${XDG_CONFIG_HOME:-$HOME/.config}/omdrop/settings"
+
+die() { printf '%s\n' "$*" >&2; exit 1; }
+
+usage() {
+  cat <<'EOF'
+omdrop -- receive files from nearby Apple devices
+
+  on [DURATION]     become visible to everyone nearby and receive files.
+                    Stops again after DURATION (default 10m); "forever" to
+                    stay on until you turn it off; "once" to stop after
+                    the first file arrives.
+  off               stop receiving and advertising, cancel any pending window
+  toggle            off if receiving, on if not
+  status [--json]   receiving or not, time left, the name Macs see
+  name [NEW]        show the name, or set it (restarts a running receiver)
+  dir [PATH]        show the download folder, or set it
+  setup             install what receiving needs: the service, the name Macs
+                    see, and this computer's certificate. Safe to run again.
+  doctor [--json]   what is still missing before this can receive
+  install-driver    build and install the Wi-Fi driver, in a terminal you watch
+  version           the plugin version, for bug reports
+
+Examples:
+  omdrop on 10m
+  omdrop on forever
+  omdrop name "Brent's Omarchy"
+EOF
+}
+
+have_unit() {
+  systemctl --user cat "$UNIT" >/dev/null 2>&1
+}
+
+require_unit() {
+  have_unit || die "The service that receives files is not installed yet. Run: omdrop setup"
+}
+
+receiving() {
+  [[ "$(systemctl --user is-active "$UNIT" 2>/dev/null)" == active ]]
+}
+
+# Seconds until the pending window closes, or nothing at all when no window is
+# armed.
+#
+# An --on-active timer is monotonic, so systemd leaves NextElapseUSecRealtime
+# empty and answers on NextElapseUSecMonotonic -- and it answers with a
+# formatted span ("10min 4.99s"), not the microseconds the property name
+# promises. systemd-analyze turns that back into a number.
+#
+# The clock to compare it against is CLOCK_MONOTONIC, which is NOT what
+# /proc/uptime reports: uptime counts suspended time and CLOCK_MONOTONIC does
+# not. A laptop that has slept for fifteen minutes reads fifteen minutes ahead
+# of the deadline, the subtraction goes negative, and the panel loses its
+# countdown on exactly the machines this ships to (observed with 9 minutes
+# left on the timer: uptime 54506, deadline 54142).
+#
+# If any step comes up empty we report no window rather than guess, and the
+# caller says "until you turn it off" -- wrong in the harmless direction.
+window_remaining() {
+  local span us now secs
+  span=$(systemctl --user show "$WINDOW.timer" \
+           -p NextElapseUSecMonotonic --value 2>/dev/null) || return 1
+  [[ -n "$span" && "$span" != 0 && "$span" != "n/a" && "$span" != infinity ]] || return 1
+  us=$(systemd-analyze timespan "$span" 2>/dev/null \
+         | awk -F': *' '$2 ~ /^[0-9]+$/ { print $2; exit }')
+  [[ -n "$us" ]] || return 1
+  now=$(python3 -c 'import time; print(time.clock_gettime(time.CLOCK_MONOTONIC))') || return 1
+  secs=$(awk -v u="$us" -v n="$now" 'BEGIN { printf "%d", u / 1000000 - n }')
+  (( secs > 0 )) || return 1
+  printf '%s\n' "$secs"
+}
+
+cancel_window() {
+  systemctl --user stop "$WINDOW.timer" >/dev/null 2>&1 || true
+  systemctl --user stop "$ONCE.path" >/dev/null 2>&1 || true
+  systemctl --user stop "$WATCH.service" >/dev/null 2>&1 || true
+}
+
+# systemd time span -> whole seconds, for the radio primitive's argument.
+span_seconds() {
+  systemd-analyze timespan "$1" 2>/dev/null \
+    | awk -F': *' '$2 ~ /^[0-9]+$/ { printf "%d", $2 / 1000000; exit }'
+}
+
+# ---------------------------------------------------------------- Wi-Fi band
+#
+# AWDL and the infra link share one radio. AWDL works on channel 6, in the
+# 2.4 GHz band; with the station associated on 5 GHz the radio cannot serve
+# both, and discovery fails. So a receive window drops the link to 2.4 GHz
+# first and puts it back afterwards.
+#
+# The band we have to restore is written to a FILE, not held in memory: `on`
+# and `off` are separate invocations, and the window usually ends in a systemd
+# timer rather than in the process that opened it. It lives under the config
+# directory rather than /run so a reboot cannot strand the user on 2.4 -- an
+# nmcli band pin survives a reboot, so the note that undoes it must too.
+BANDRESTORE="${XDG_CONFIG_HOME:-$HOME/.config}/omdrop/band-restore"
+
+# Networks this machine has seen a 2.4 GHz BSS on, one connection UUID per
+# line. A scan that misses a band and a network that has no such band are
+# indistinguishable in one sample, and we were reporting the second whenever we
+# saw the first: "no 2.4 GHz band found for this network" about the very
+# network the user had been receiving on all day. One remembered sighting is
+# enough to know which of the two it is.
+BANDSEEN="${XDG_CONFIG_HOME:-$HOME/.config}/omdrop/networks-with-24"
+
+# The active Wi-Fi profile's UUID. Used as the key because it survives an SSID
+# with a ':' or a '\' in it, which nmcli's -t output would need unescaping for.
+wifi_uuid() {
+  nmcli -t -f UUID,TYPE connection show --active 2>/dev/null |
+    awk -F: '$2 == "802-11-wireless" { print $1; exit }'
+}
+
+band24_remember() {
+  local uuid=$1
+  [[ -n "$uuid" ]] || return 0
+  band24_known "$uuid" && return 0
+  mkdir -p "$(dirname "$BANDSEEN")"
+  printf '%s\n' "$uuid" >> "$BANDSEEN"
+}
+
+band24_known() {
+  [[ -n "$1" && -r "$BANDSEEN" ]] && grep -qxF "$1" "$BANDSEEN"
+}
+
+band_field() {
+  command -v omarchy-network-band >/dev/null 2>&1 || return 1
+  omarchy-network-band 2>/dev/null | awk -v k="$1" '$1 == k { print $2; exit }'
+}
+
+# Drop to 2.4 GHz for the window, remembering what to put back. Returns
+# non-zero only when we needed to move and could not.
+band_drop_to_24() {
+  command -v omarchy-network-band >/dev/null 2>&1 || return 0
+  local cur sel avail uuid
+  local i try
+  cur=$(band_field band); sel=$(band_field selected); avail=$(band_field available)
+  [[ -n "$cur" ]] || return 0                       # no wi-fi to reason about
+  uuid=$(wifi_uuid)
+  [[ ",$avail," == *2.4* ]] && band24_remember "$uuid"
+  [[ "$cur" != 2.4 ]] || { band24_remember "$uuid"; return 0; }   # already there
+
+  # omarchy-network-band reads NetworkManager's cached scan (--rescan no, so
+  # that polling it stays cheap). A cache that has not seen the AP's 2.4 GHz
+  # BSS lately is indistinguishable from a network that has none -- and a
+  # 5 GHz association is exactly the situation where the 2.4 entry goes stale.
+  # This runs once, when a window opens, so it can afford to ask for the truth.
+  #
+  # `device wifi rescan` is the wrong tool for that: it only *requests* a scan,
+  # returns in milliseconds, and NetworkManager refuses it outright when
+  # another scan ran recently -- so polling afterwards just re-reads an
+  # unchanged cache. `list --rescan yes` blocks until the results are in
+  # (~3.5 s here) and waits for a scan already in flight instead of failing.
+  #
+  # Twice, because one scan is one sample: a single sweep that lands while the
+  # radio is elsewhere drops a band that is plainly there, and the price of
+  # believing it is a feature that refuses to start.
+  for try in 1 2; do
+    [[ ",$avail," == *2.4* ]] && break
+    timeout 25 nmcli device wifi list --rescan yes >/dev/null 2>&1 || true
+    for i in $(seq 1 5); do
+      avail=$(band_field available)
+      [[ ",$avail," == *2.4* ]] && break
+      sleep 1
+    done
+  done
+
+  if [[ ",$avail," == *2.4* ]]; then
+    band24_remember "$uuid"
+  else
+    # Three different situations, and they used to share one sentence that
+    # asserted the strongest of them. Only claim the network has no 2.4 GHz
+    # when we have never seen it on 2.4; otherwise say the scan missed it,
+    # which is both true and worth retrying.
+    if band24_known "$uuid"; then
+      echo "this network's 2.4 GHz band did not answer a scan just now, and AirDrop needs it. It has been there before, so this is worth trying again in a moment." >&2
+    elif [[ -z "$avail" ]]; then
+      echo "no Wi-Fi networks answered a scan just now, so AirDrop cannot tell whether this one has the 2.4 GHz band it needs. Try again in a moment." >&2
+    else
+      echo "this network appears to have no 2.4 GHz band, and AirDrop needs one to reach Apple devices (the scan found: $avail)." >&2
+    fi
+    return 1
+  fi
+
+  # A profile pinned to a band the radio is not actually on is broken state,
+  # and it defeats the move below: omarchy-network-band sees previous ==
+  # desired, exits 0 without reassociating, and we wait 30 s for something
+  # that never started. Clear the pin so the move is a real change. What gets
+  # remembered is "auto", not the pin -- putting back a pin the link never
+  # honoured is not a restoration.
+  if [[ "$sel" == 2.4 ]]; then
+    echo "omdrop: profile is pinned to 2.4 GHz but the link is on $cur; clearing the pin" >&2
+    omarchy-network-band auto >/dev/null 2>&1 || true
+    sel=auto
+  fi
+
+  mkdir -p "$(dirname "$BANDRESTORE")"
+  printf '%s
+' "${sel:-auto}" > "$BANDRESTORE"
+  echo "omdrop: moving Wi-Fi to 2.4 GHz for this window (was ${sel:-auto})" >&2
+  omarchy-network-band 2.4 >/dev/null 2>&1 || { rm -f "$BANDRESTORE"; return 1; }
+
+  # Reassociation is not instant. Wait for the link rather than starting the
+  # radio on a band we have not landed on yet.
+  for i in $(seq 1 30); do
+    [[ "$(band_field band)" == 2.4 ]] && return 0
+    sleep 1
+  done
+  echo "omdrop: still not on 2.4 GHz after 30s" >&2
+  return 1
+}
+
+# Put the band back exactly as we found it. Safe to call when we never moved.
+band_restore() {
+  [[ -r "$BANDRESTORE" ]] || return 0
+  local want; want=$(head -1 "$BANDRESTORE" | tr -d '[:space:]')
+  rm -f "$BANDRESTORE"
+  [[ -n "$want" ]] || return 0
+  command -v omarchy-network-band >/dev/null 2>&1 || return 0
+  echo "omdrop: restoring Wi-Fi band to $want" >&2
+  omarchy-network-band "$want" >/dev/null 2>&1 || true
+}
+
+setting_get() {
+  [[ -r "$SETTINGS" ]] || return 0
+  sed -n "s/^$1=//p" "$SETTINGS" | tail -1
+}
+
+setting_set() {
+  mkdir -p "$(dirname "$SETTINGS")"
+  local tmp; tmp=$(mktemp "$SETTINGS.XXXXXX")
+  { [[ -r "$SETTINGS" ]] && grep -v "^$1=" "$SETTINGS"; echo "$1=$2"; } > "$tmp"
+  mv -f "$tmp" "$SETTINGS"
+}
+
+
+# ~/Downloads reads better than /home/someone/Downloads everywhere a person
+# sees it.
+tildify() { local p=$1; printf '%s\n' "${p/#$HOME/\~}"; }
+
+default_name() { hostname -s 2>/dev/null || echo omdrop; }
+effective_name() { local n; n=$(cfg_get name); [[ -n "$n" ]] && printf '%s\n' "$n" || default_name; }
+effective_dir() { local d; d=$(cfg_get download_dir); [[ -n "$d" ]] && printf '%s\n' "$d" || printf '%s\n' "$HOME/Downloads"; }
+
+cfg_get() {
+  CONFIG="$CONFIG" python3 - "$1" <<'PY'
+import os, sys, tomllib
+try:
+    with open(os.environ['CONFIG'], 'rb') as f:
+        print(tomllib.load(f).get(sys.argv[1], ''))
+except FileNotFoundError:
+    print('')
+except tomllib.TOMLDecodeError as e:
+    sys.exit(f'{os.environ["CONFIG"]}: {e}')
+PY
+}
+
+# Rewrite one key, keeping every other key the file already carries. Atomic, so
+# a receiver starting mid-write never reads half a file.
+cfg_set() {
+  CONFIG="$CONFIG" python3 - "$1" "$2" <<'PY'
+import os, sys, tomllib, tempfile
+path, key, val = os.environ['CONFIG'], sys.argv[1], sys.argv[2]
+os.makedirs(os.path.dirname(path), exist_ok=True)
+try:
+    with open(path, 'rb') as f:
+        cfg = tomllib.load(f)
+except FileNotFoundError:
+    cfg = {}
+except tomllib.TOMLDecodeError as e:
+    sys.exit(f'{path}: {e}')
+cfg[key] = val
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix='.config.toml.')
+with os.fdopen(fd, 'w') as f:
+    for k, v in cfg.items():
+        esc = v.replace('\\', '\\\\').replace('"', '\\"')
+        f.write(f'{k} = "{esc}"\n')
+os.chmod(tmp, 0o644)
+os.replace(tmp, path)
+PY
+}
+
+# ------------------------------------------------------------------ first run
+#
+# Nothing runs when a plugin is installed: `omarchy plugin add` clones a
+# repository and enables it, and that is the whole mechanism. So the systemd
+# user unit that runs the receiver, the config file it reads and the TLS
+# material it serves with have to be created by a command somebody runs once.
+# That command is this one, and the panel may call it too, so every step is
+# idempotent: it compares before it writes and says only what it changed.
+#
+# What it cannot do is install the driver package. That needs root and pacman,
+# and pretending otherwise would turn "set up" into a promise we break at the
+# first transfer. Missing pieces get named, never guessed at and never faked.
+
+# The clone we were run from -- it carries the unit template and the receiver.
+# $0 rather than $SELF, for the reason omdrop_version gives: during development
+# the plugin's bin/omdrop is a symlink into a source checkout, and resolving it
+# lands beside the script instead of beside the files that shipped with it.
+plugin_dir() {
+  cd "$(dirname "$0")/.." 2>/dev/null && pwd
+}
+
+opendrop_installed() { python3 -c 'import opendrop' >/dev/null 2>&1; }
+
+# opendrop builds a self-signed certificate the first time it constructs a
+# config, so do that here rather than in the middle of somebody's first
+# transfer -- openssl takes a moment, and the unit's start would be waiting on
+# it while a sender is already knocking.
+ensure_tls() {
+  local keys="$HOME/.opendrop/keys"
+  [[ -r "$keys/certificate.pem" && -r "$keys/key.pem" ]] && return 1
+  opendrop_installed || return 2
+  OPENDROP_NAME="$(effective_name)" python3 - >/dev/null 2>&1 <<'PY' || return 2
+import os
+from opendrop.config import AirDropConfig
+AirDropConfig(computer_name=os.environ['OPENDROP_NAME'],
+              airdrop_dir=os.path.join(os.path.expanduser('~'), '.opendrop'))
+PY
+  [[ -r "$keys/certificate.pem" && -r "$keys/key.pem" ]] || return 2
+  return 0
+}
+
+cmd_setup() {
+  local plugin template installed unit_target rendered did=0
+
+  plugin=$(plugin_dir) \
+    || die "omdrop cannot tell where it is installed, so it did not change anything."
+  template="$plugin/share/$UNIT"
+  [[ -r "$template" ]] \
+    || die "This copy of omdrop is missing the file that describes the receiving service, so there is nothing to set up. Install the plugin again."
+  [[ -r "$plugin/bin/airdrop-serve.py" ]] \
+    || die "This copy of omdrop is missing the program that receives files. Install the plugin again."
+
+  # Bash substitution rather than sed: an installation path may hold any
+  # character a filename may hold, and sed would need it escaped for whichever
+  # delimiter we picked.
+  rendered=$(cat "$template") || die "omdrop could not read its own files."
+  rendered=${rendered//@PLUGIN_DIR@/$plugin}
+  # A unit with the placeholder still in it is a unit that starts nothing, and
+  # it would fail at the worst moment -- when someone is standing there trying
+  # to send a file. Refuse to write one.
+  [[ "$rendered" != *@PLUGIN_DIR@* ]] \
+    || die "omdrop could not work out where it is installed, so the receiving service was left alone."
+
+  unit_target="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$UNIT"
+  mkdir -p "$(dirname "$unit_target")" \
+    || die "omdrop could not create the folder systemd keeps your own services in."
+  installed=
+  [[ -r "$unit_target" ]] && installed=$(cat "$unit_target")
+  if [[ "$rendered" != "$installed" ]]; then
+    printf '%s\n' "$rendered" > "$unit_target" \
+      || die "omdrop could not write the receiving service."
+    systemctl --user daemon-reload \
+      || die "The receiving service was written, but systemd would not reload it. Log out and back in, then try again."
+    did=1
+    echo "Set up the service that receives files."
+  fi
+
+  if [[ -z "$(cfg_get name)" ]]; then
+    cfg_set name "$(default_name)" \
+      || die "omdrop could not save the name Apple devices will see."
+    did=1
+    printf 'Apple devices will see this computer as "%s". Change it with: omdrop name\n' "$(effective_name)"
+  fi
+
+  ensure_tls
+  case $? in
+    0) did=1; echo "Created the certificate this computer identifies itself with." ;;
+    2) echo "The certificate this computer identifies itself with could not be created yet; the missing piece is below." >&2 ;;
+  esac
+
+  (( did )) || echo "Everything omdrop sets up for you was already in place."
+
+  local missing=()
+  readarray -t missing < <(prereqs_missing)
+
+  if (( ${#missing[@]} )); then
+    printf '\nNot ready to receive yet:\n'
+    printf -- '  - %s\n' "${missing[@]}"
+    return 0
+  fi
+  printf '\nReady. Turn receiving on from the bar, or run: omdrop on\n'
+}
+
+# What is missing, in the order it has to be fixed: no receiver library means
+# nothing can serve, no driver means no radio, and awdl0 only appears once the
+# driver is loaded. One sentence each, for someone holding a laptop.
+#
+# Shared with `doctor` rather than living inside `setup`, because the panel
+# needs it too: a first run that cannot work showed "Not available" and a
+# pointer to the README, which is the whole first-run experience for anyone who
+# installed the plugin before the driver.
+# Each line is "id<TAB>sentence": the id is for the panel, which offers to fix
+# the one thing it can, and the sentence is for the person reading it.
+prereqs_missing() {
+  opendrop_installed \
+    || printf 'library\t%s\n' "The AirDrop support library is not installed. It comes with the driver package."
+  if [[ ! -x "$DISCOVERABLE" ]]; then
+    printf 'driver\t%s\n' "The Wi-Fi driver that makes this computer visible to Apple devices is not installed. It has to be built and installed as an administrator."
+  elif [[ ! -e /sys/class/net/awdl0 ]]; then
+    printf 'radio\t%s\n' "The driver is installed but its Apple-compatible radio is not running yet, so nobody can see this computer. Restarting usually brings it up."
+  fi
+  have_unit || printf 'service\t%s\n' "The service that receives files is not installed yet. Run: omdrop setup"
+}
+
+# `doctor` is the panel's version of the same answer. --json so the widget can
+# render the first blocking sentence instead of a generic refusal, and know
+# whether the thing in the way is one it can offer to install.
+cmd_doctor() {
+  local missing=()
+  readarray -t missing < <(prereqs_missing)
+  if [[ "${1:-}" == --json ]]; then
+    MISSING=$(printf '%s\n' "${missing[@]}") python3 -c '
+import json, os
+rows = [l.split("\t", 1) for l in os.environ["MISSING"].split("\n") if l.strip()]
+print(json.dumps({"ready": not rows,
+                  "missing": [{"id": r[0], "say": r[1]} for r in rows]}))'
+    return 0
+  fi
+  if (( ${#missing[@]} )); then
+    printf 'Not ready to receive yet:\n'
+    printf -- '  - %s\n' "${missing[@]#*$'\t'}"
+    return 0
+  fi
+  printf 'Ready to receive.\n'
+}
+
+# Installing a kernel module is not something a bar widget may do quietly. This
+# follows Omarchy's own pattern for installing from a UI -- a floating terminal
+# running the command, the user's own sudo prompt, all output visible -- rather
+# than pkexec'ing a build script out of a plugin clone, which would be root
+# running user-writable code. makepkg refuses to run as root anyway.
+DRIVER_REPO=https://github.com/brentkearney/omdrop-awdl.git
+cmd_install_driver() {
+  if [[ -x "$DISCOVERABLE" ]]; then
+    echo "The driver is already installed. Nothing to do."
+    return 0
+  fi
+  # Into the cache directory, not a temp dir. Three reasons: someone who has
+  # just installed a kernel module as root should still have the source they
+  # built afterwards, /tmp is tmpfs on this hardware so the clone and the built
+  # package would sit in RAM until reboot, and a later version is then a pull
+  # rather than a fresh clone. Re-running this updates in place.
+  #
+  # Written as one script so the terminal shows exactly what it will run, and
+  # so a user without the launcher can paste the same thing.
+  local src="${XDG_CACHE_HOME:-$HOME/.cache}/omdrop/omdrop-awdl"
+  local build="set -e
+mkdir -p \"\$(dirname '$src')\"
+if [ -d '$src/.git' ]; then
+  git -C '$src' pull --ff-only
+else
+  git clone $DRIVER_REPO '$src'
+fi
+cd '$src'
+makepkg -si"
+  if ! command -v omarchy-launch-floating-terminal-with-presentation >/dev/null 2>&1; then
+    echo "Omdrop requires a patched wifi driver, which requires administrative privilege to install. You will be prompted for your password."
+    echo
+    echo "Install the driver with:"
+    printf '\n%s\n\n' "$build"
+    return 0
+  fi
+  echo "Opening a terminal to build and install the driver."
+  omarchy-launch-floating-terminal-with-presentation \
+    "echo 'Omdrop requires a patched wifi driver, which requires administrative privilege to install. You will be prompted for your password.'; echo; $build"
+}
+
+cmd_on() {
+  require_unit
+  local dur=${1:-$DEFAULT_WINDOW} secs= mode=timed
+  case "$dur" in
+    forever) dur=; mode=forever ;;
+    once)    dur=; mode=once ;;
+    *)
+      # Check the duration before touching anything: a typo must not leave us
+      # visible with no window when a window is exactly what was asked for.
+      [[ "$dur" =~ ^[0-9]+(s|sec|m|min|h|hour|d|day)?$ ]] \
+        || die "duration $dur: a systemd time span such as 10m or 1h, or \"once\" or \"forever\""
+      secs=$(span_seconds "$dur")
+      [[ -n "$secs" ]] || die "duration $dur: could not read that as a time span"
+      # Zero means one-shot, which is how the panel's slider spells its floor.
+      (( secs > 0 )) || { dur=; mode=once; }
+      ;;
+  esac
+
+  cancel_window
+
+  # Band before either: AWDL works on channel 6, and the station and AWDL share
+  # one radio, so a link associated on 5 GHz cannot serve both. Moving after
+  # the window is up would strand it on the wrong band.
+  if ! band_drop_to_24; then
+    die "Wi-Fi could not be moved to the 2.4 GHz band, which AirDrop needs.
+Nothing was started; your connection is unchanged."
+  fi
+
+  # Receiver FIRST when it can start, radio second. Run 20260912T222217Z is the
+  # argument for the order: the window advertised 16 s before the receiver was
+  # listening, a sender found us in that gap, and 45 SYNs to 8771 were answered
+  # by nothing -- 6 peers registered, zero HTTP requests, no file.
+  #
+  # But a cold awdl0 carries no link-local until AWDL is enabled and carrier
+  # comes up, and the receiver refuses to start without one (03:57:16Z: it
+  # failed outright and took the whole window with it). So when the address is
+  # not there yet, the radio has to go first -- the exposure is then the second
+  # between advertising and the receiver's bind, not sixteen.
+  local RADIO_ERR=
+  # What the radio side actually said, so the panel can show a reason instead
+  # of a command to go and run. awdl-discoverable timestamps every line and
+  # ends with the failure; keep that last line and drop the timestamp.
+  radio_up() {
+    [[ -x "$DISCOVERABLE" ]] || return 0
+    local out rc
+    out=$(pkexec "$DISCOVERABLE" start "${secs:-0}" 2>&1 >/dev/null); rc=$?
+    # 5 is "already starting or already visible": a race with a window that is
+    # already coming up, not a refusal. Anything else is a real failure.
+    (( rc == 0 || rc == 5 )) && return 0
+    RADIO_ERR=$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | tail -1 \
+                | sed -E 's/^[0-9]{2}:[0-9]{2}:[0-9]{2}Z //')
+    return 1
+  }
+  local receiver_first=0
+  ip -6 addr show dev awdl0 scope link 2>/dev/null | grep -q inet6 && receiver_first=1
+
+  # systemd latches a unit that failed too often: once the start limit is hit,
+  # every later `start` is refused outright with no attempt made, and the panel
+  # reports "The AirDrop receiver would not start" forever. That is what a user
+  # meets the morning after a transfer -- the receiver could not rebind 8771,
+  # restarted four times, and latched. Clearing the latch costs nothing when
+  # there is none, and is the difference between a transient failure and a
+  # feature that never works again.
+  start_receiver() {
+    systemctl --user reset-failed "$UNIT" >/dev/null 2>&1 || true
+    systemctl --user start "$UNIT"
+  }
+
+  # Every bail-out from here on has to undo the band move, or the user is left
+  # pinned to 2.4 GHz by a window that never opened.
+  if (( receiver_first )); then
+    if ! start_receiver; then
+      band_restore
+      die "The AirDrop receiver would not start."
+    fi
+    if ! radio_up; then
+      systemctl --user stop "$UNIT" >/dev/null 2>&1
+      band_restore
+      die "${RADIO_ERR:-The AirDrop radio could not be started.}"
+    fi
+  else
+    if ! radio_up; then
+      band_restore
+      die "${RADIO_ERR:-The AirDrop radio could not be started.}"
+    fi
+    if ! start_receiver; then
+      [[ -x "$DISCOVERABLE" ]] && pkexec "$DISCOVERABLE" stop >/dev/null 2>&1
+      band_restore
+      die "The AirDrop receiver would not start."
+    fi
+  fi
+
+  case "$mode" in
+    timed)
+      systemd-run --user --quiet --on-active="$dur" --unit="$WINDOW" "$SELF" off \
+        || die "receiving, but the $dur window could not be armed -- turn it off yourself" ;;
+  esac
+
+  # One watcher either way: it announces every file
+  # that lands, and in "once" mode turns us off after the first one.
+  local watchArgs=()
+  [[ "$mode" == once ]] && watchArgs=(--once)
+  systemd-run --user --quiet --unit="$WATCH" "$SELF" watch "${watchArgs[@]}" \
+    || echo "receiving, but nothing is watching for arrivals" >&2
+  cmd_status
+}
+
+cmd_off() {
+  require_unit
+  cancel_window
+  systemctl --user stop "$UNIT" || die "The AirDrop receiver would not stop."
+  # Stop advertising even if the receiver was already down: the two can drift
+  # apart when something else stopped one of them.
+  [[ -x "$DISCOVERABLE" ]] && pkexec "$DISCOVERABLE" stop >/dev/null 2>&1
+  # Last, and unconditionally. The note is only written when we actually moved,
+  # so this is a no-op otherwise -- and it has to run even when the stops above
+  # failed, or the user stays pinned to 2.4 GHz.
+  band_restore
+  cmd_status
+}
+
+cmd_toggle() {
+  require_unit
+  if receiving; then cmd_off; else cmd_on "${1:-}"; fi
+}
+
+cmd_status() {
+  local json=0
+  [[ "${1:-}" == --json ]] && json=1
+  local on=false left= vis=unknown mode=off
+  receiving && on=true
+  if [[ "$on" == true ]]; then
+    mode=forever
+    systemctl --user is-active "$ONCE.path"   >/dev/null 2>&1 && mode=once
+    systemctl --user is-active "$WINDOW.timer" >/dev/null 2>&1 && mode=timed
+  fi
+  left=$(window_remaining) || left=
+  local reason= rxproven=0
+  if [[ -x "$DISCOVERABLE" ]]; then
+    vis=false
+    local rs; rs=$("$DISCOVERABLE" status --json 2>/dev/null || true)
+    # Anchored on the value, not "somewhere after the key": the old pattern
+    # was *"visible":*true*, and {"visible":false,...,"rx_proven":true} matches
+    # that -- the panel was shown as visible whenever any later field was true.
+    [[ "$rs" == *'"visible":true'* ]] && vis=true
+    reason=$(printf '%s' "$rs" | sed -n 's/.*"reason":"\([^"]*\)".*/\1/p')
+    # rx_proven distinguishes a window the gate proved receive on from one it
+    # opened on transmit alone. Both are live; only the wording differs.
+    [[ "$rs" == *'"rx_proven":true'* ]] && rxproven=1 || rxproven=0
+  fi
+
+  if (( json )); then
+    ON="$on" LEFT="$left" VIS="$vis" MODE="$mode" DIR="$(effective_dir)" \
+    REASON="$reason" \
+    RXPROVEN="$rxproven" BAND="$(band_field band)" BANDHELD="$([[ -r "$BANDRESTORE" ]] && echo 1 || echo 0)" \
+    NAME="$(effective_name)" python3 -c '
+import json, os
+left, vis = os.environ["LEFT"], os.environ["VIS"]
+print(json.dumps({
+    "receiving": os.environ["ON"] == "true",
+    # null when the radio half is not installed: we genuinely do not know, and
+    # the panel must not draw that as "yes".
+    "visible": None if vis == "unknown" else vis == "true",
+    "remaining": int(left) if left else None,
+    "name": os.environ["NAME"] or None,
+    "dir": os.environ["DIR"],
+    "mode": os.environ["MODE"],
+    "reason": os.environ["REASON"] or None,
+    "band": os.environ["BAND"] or None,
+    # True when omdrop moved the band and still owes the user a restore.
+    "band_held": os.environ["BANDHELD"] == "1",
+    "rx_proven": os.environ["RXPROVEN"] == "1",
+}))'
+    return
+  fi
+
+  if [[ "$on" != true ]]; then
+    printf 'Not receiving\n'
+    return
+  fi
+  local window="until you turn it off"
+  [[ -n "$left" ]] && window=$(printf '%d:%02d left' $((left / 60)) $((left % 60)))
+  case "$vis" in
+    true)    printf 'Visible to everyone as "%s" -- %s\n' "$(effective_name)" "$window" ;;
+    false)   printf 'Receiving as "%s" -- %s, but NOT visible: the radio side is not advertising\n' \
+               "$(effective_name)" "$window" ;;
+    unknown) printf 'Receiving as "%s" -- %s (cannot tell if anyone can see us: %s is missing)\n' \
+               "$(effective_name)" "$window" "${DISCOVERABLE#$PROJ/}" ;;
+  esac
+}
+
+# The unit is hardened with ProtectHome=read-only, so the download folder has
+# to be named in ReadWritePaths or the receiver cannot write there. Rather than
+# drop the hardening, keep the unit honest and write a drop-in naming exactly
+# the folder in use -- the unit's own header asks for this.
+# Follow the receiver's own log rather than the folder: it names the files it
+# stored, which is the path we need, and it cannot be fooled by an
+# unrelated download landing in the same directory.
+cmd_watch() {
+  local once=0
+  [[ "${1:-}" == --once ]] && once=1
+  local dir; dir=$(effective_dir)
+  echo "omdrop watch: following $UNIT, saving into $dir"
+  journalctl --user -u "$UNIT" -f -n 0 -o cat 2>/dev/null | while IFS= read -r line; do
+    local files=()
+    case "$line" in
+      *"upload "*": stored "*)
+        local rest=${line#*: stored }
+        IFS=',' read -ra files <<< "$rest" ;;
+      *"link stored as "*)
+        local rest=${line#*link stored as }
+        files=("${rest%% -> *}") ;;
+      *) continue ;;
+    esac
+    for f in "${files[@]}"; do
+      f="${f#"${f%%[![:space:]]*}"}"      # trim
+      f="${f%"${f##*[![:space:]]}"}"
+      [[ -n "$f" ]] || continue
+      [[ "$f" == /* ]] || f="$dir/$f"
+      if [[ ! -e "$f" ]]; then
+        echo "omdrop watch: receiver named '$f' but it is not there" >&2
+        continue
+      fi
+      echo "omdrop watch: announcing $f"
+      "$SELF" handle "$f" &
+    done
+    if (( once )) && (( ${#files[@]} )); then
+      "$SELF" off >/dev/null 2>&1
+      return 0
+    fi
+  done
+}
+
+# The URL inside an Apple .webloc or a Windows .url shortcut. Both are what an
+# Apple device sends when you share a link rather than a file.
+link_target() {
+  case "${1,,}" in
+    *.url)    sed -n 's/^URL=//p' "$1" | head -1 ;;
+    *.webloc) grep -oE 'https?://[^<]+' "$1" | head -1 ;;
+  esac
+}
+
+# Launch a GUI app so it OUTLIVES us. The watcher runs as a transient systemd
+# service, and a service's cgroup is killed when it exits -- taking any
+# setsid-detached child with it, which is why an opened image vanished before
+# it could map a window. uwsm-app puts the app in its own unit in app.slice,
+# which is what the rest of Omarchy does (see omarchy-launch-browser).
+launch() {
+  # Synchronously, and NOT backgrounded: uwsm-app returns once the app has its
+  # own unit, and we must still be alive at that moment. Backgrounding it and
+  # exiting killed it in our cgroup before the handoff -- the app never
+  # appeared, silently.
+  if command -v uwsm-app >/dev/null 2>&1; then
+    uwsm-app -- "$@" || echo "omdrop: uwsm-app could not launch: $*" >&2
+  else
+    systemd-run --user --quiet --collect "$@" \
+      || echo "omdrop: could not launch: $*" >&2
+  fi
+}
+
+act_open() {
+  local f=$1 url; url=$(link_target "$f")
+  if [[ -n "$url" ]]; then omarchy-launch-browser "$url" >/dev/null 2>&1 &
+  else launch xdg-open "$f"
+  fi
+}
+
+# A received link is a URL chosen by whoever is standing nearby, and while
+# discoverable to Everyone that is a one-tap phishing delivery. The receiver
+# stores links inert; nothing here opens one on its own. act_open exists only
+# behind a click the user made on the notification.
+
+# Put the arrival on the clipboard as well as announcing it: a link as its URL,
+# an image as the image itself, anything else as its path. wl-copy forks a
+# server to own the selection, so it has to survive us -- launch() gives it its
+# own unit, the same reason the viewer needed one.
+copy_to_clipboard() {
+  local f=$1 url; url=$(link_target "$f")
+  command -v wl-copy >/dev/null 2>&1 || return 0
+  if [[ -n "$url" ]]; then
+    printf '%s' "$url" | launch wl-copy
+    return
+  fi
+  case "${f,,}" in
+    *.png)  launch wl-copy --type image/png  < "$f" ;;
+    *.jpg|*.jpeg) launch wl-copy --type image/jpeg < "$f" ;;
+    *.gif)  launch wl-copy --type image/gif  < "$f" ;;
+    *.webp) launch wl-copy --type image/webp < "$f" ;;
+    *)      printf '%s' "$f" | launch wl-copy ;;
+  esac
+}
+
+act_notify() {
+  local f=$1 args=()
+  copy_to_clipboard "$f"
+  # Only images get a thumbnail, the way a screenshot notification does.
+  case "${f,,}" in *.png|*.jpg|*.jpeg|*.gif|*.webp|*.heic|*.avif) args+=(--image "$f") ;; esac
+  # Same shape as omarchy-capture-screenshot: clipboard plus file, a thumbnail,
+  # and the whole toast clickable. The notification service honours exactly one
+  # action -- the default, fired by clicking the body -- and --exec is how
+  # Omarchy's own toasts use it.
+  #
+  # -t 8000 is a deliberate number, not the default. The shell treats
+  # expire_timeout as a FLOOR, not a ceiling: durationFor() is
+  # max(lowPopupDuration=5000, requested) for low urgency, so the toast was
+  # already holding 5.1 s (measured off NotificationClosed, reason 1) and
+  # asking for 5000 would have changed nothing. This toast is the only place
+  # the name of what landed appears, and the only thing to click to open it,
+  # so it gets 8 s -- what a normal-urgency toast would get -- without
+  # claiming the urgency of one.
+  local what="Saved to $(tildify "$(dirname "$f")")/"
+  command -v wl-copy >/dev/null 2>&1 && what="Copied to clipboard, saved to $(tildify "$(dirname "$f")")/"
+  omarchy-notification-send -t 8000 "$(basename "$f")" "$what (or click this)" \
+    "${args[@]}" --exec "$SELF" act open "$f" >/dev/null \
+    || echo "omdrop: notification failed for $f" >&2
+}
+
+# What to do with a file once the user has asked for it: `act open` is what the
+# notification fires when clicked, and shell/browse are here for the terminal.
+# Each goes through launch(), which keeps the app out of our cgroup.
+cmd_act() {
+  local what=${1:?usage: omdrop act open|shell|browse FILE} f=${2:?}
+  local dir; dir=$(dirname "$f")
+  case "$what" in
+    open)   act_open "$f" ;;
+    shell)  ( cd "$dir" && launch "$(omarchy-default-terminal)" ) ;;
+    browse) launch xdg-open "$dir" ;;
+    *) die "act $what: one of open, shell, browse" ;;
+  esac
+}
+
+# One behaviour for every arrival: save, copy, announce. Opening is left to a
+# click on the notification, so nothing runs on the user's behalf unasked.
+cmd_handle() {
+  local f=${1:?usage: omdrop handle FILE}
+  act_notify "$f"
+}
+
+cmd_dir() {
+  if (( $# == 0 )); then
+    printf '%s\n' "$(effective_dir)"
+    return
+  fi
+  local want=${1/#\~/$HOME} new
+  [[ -d "$want" ]] || die "$want: not a directory (create it first)"
+  new=$(readlink -f "$want")
+  [[ -O "$new" ]] || die "$new: you do not own it; received files land here as you"
+  local old; old=$(cfg_get download_dir)
+  cfg_set download_dir "$new" || die "could not write $CONFIG"
+
+  local dropin="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$UNIT.d"
+  mkdir -p "$dropin"
+  # An empty assignment resets the list the base unit set; without it a
+  # drop-in only ADDS, leaving the old folder writable and listing it twice.
+  { echo "# Written by omdrop. Declares exactly the paths the receiver may write."
+    echo "[Service]"
+    echo "ReadWritePaths="
+    echo "ReadWritePaths=$new"
+    echo "ReadWritePaths=%h/.opendrop"
+  } > "$dropin/10-download-dir.conf"
+  systemctl --user daemon-reload
+
+  if receiving; then
+    if ! systemctl --user restart "$UNIT"; then
+      [[ -n "$old" ]] && cfg_set download_dir "$old"
+      systemctl --user restart "$UNIT" >/dev/null 2>&1 || true
+      die "the receiver refused $new, so it is still ${old:-the default}.
+systemctl --user status $UNIT"
+    fi
+  fi
+  printf 'Files will land in %s\n' "$new"
+}
+
+cmd_name() {
+  if (( $# == 0 )); then
+    printf '%s\n' "$(effective_name)"
+    return
+  fi
+  local new=$1 old
+  [[ -n "${new//[[:space:]]/}" ]] || die "name: cannot be empty"
+  (( ${#new} <= 63 )) || die "name: 63 characters at most (this one is ${#new})"
+  [[ "$new" != *[/\\]* ]] || die "name: no path separators"
+  [[ "$new" != *[[:cntrl:]]* ]] || die "name: no control characters"
+  old=$(cfg_get name)
+  cfg_set name "$new" || die "could not write $CONFIG"
+  if receiving; then
+    # The receiver reads config.toml once, at start. Restart to pick it up --
+    # and if it refuses the new name, put the old one back rather than leave a
+    # dead receiver behind a config the user thinks took effect.
+    if ! systemctl --user restart "$UNIT"; then
+      cfg_set name "$old"
+      systemctl --user restart "$UNIT" >/dev/null 2>&1 || true
+      die "the receiver refused \"$new\", so it is still \"$old\".
+systemctl --user status $UNIT"
+    fi
+  fi
+  printf 'Macs will see "%s"\n' "$new"
+}
+
+case "${1:-status}" in
+  on)     shift; cmd_on "$@" ;;
+  off)    shift; cmd_off ;;
+  toggle) shift; cmd_toggle "$@" ;;
+  status) shift; cmd_status "$@" ;;
+  name)   shift; cmd_name "$@" ;;
+  dir)    shift; cmd_dir "$@" ;;
+  setup)  shift; cmd_setup "$@" ;;
+  doctor) shift; cmd_doctor "$@" ;;
+  install-driver) shift; cmd_install_driver ;;
+  act)    shift; cmd_act "$@" ;;
+  watch)  shift; cmd_watch "$@" ;;
+  handle) shift; cmd_handle "$@" ;;
+  -V|--version|version) printf 'omdrop %s\n' "$(omdrop_version)" ;;
+  -h|--help|help) usage ;;
+  *)      usage >&2; exit 1 ;;
+esac

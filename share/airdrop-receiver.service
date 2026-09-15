@@ -1,0 +1,63 @@
+# AirDrop receiver -- the user half of the service pair.
+#
+# Runs bin/airdrop-serve.py as the user: port 8771, the user's keys, the user's
+# download folder from ~/.config/airdrop/config.toml. Never root -- that is what
+# makes received files the user's without a chown. The AWDL control plane
+# (driver, awdl0, gate, announcer, peer registration) belongs to the system
+# side; this unit only requires that awdl0 exist and carry its link-local.
+#
+# @PLUGIN_DIR@ is substituted with the plugin's own directory when `omdrop
+# setup` installs this file into ~/.config/systemd/user/. Do not install this
+# template by hand: a unit still carrying the placeholder cannot start, and
+# setup refuses to write one.
+#
+# NOT enabled. `omdrop on` starts it for the length of a receive window and
+# `omdrop off` stops it again, which is what keeps "visible to everyone" a
+# bounded state. Enabling it would make this machine receive all the time.
+# Config change = restart: systemctl --user restart airdrop-receiver.service
+
+[Unit]
+Description=AirDrop receiver over firmware-native AWDL (awdl0)
+Documentation=file:@PLUGIN_DIR@/README.md
+# awdl0 is created by the root-side control plane; wait for it, do not create it.
+After=sys-subsystem-net-devices-awdl0.device
+BindsTo=sys-subsystem-net-devices-awdl0.device
+ConditionPathExists=/sys/class/net/awdl0
+
+[Service]
+Type=simple
+WorkingDirectory=@PLUGIN_DIR@
+# name / model / download_dir come from %h/.config/airdrop/config.toml; the
+# receiver validates them and refuses to start on a bad value (exit 1, and
+# systemd's default start limit stops the retry storm that would follow).
+# A restart can outrun its own predecessor's socket teardown: one did, the
+# receiver reported "port 8771 busy, opendrop moved to 8772" and exited 1. It
+# recovered, but SYNs arriving in that gap hit nothing. Wait for the port to
+# clear rather than racing for it.
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 40); do ss -Hltn 2>/dev/null | grep -q ":8771 " || exit 0; sleep 0.25; done; echo "port 8771 still busy after 10s" >&2; exit 1'
+# awdl0 exists a moment before it carries its link-local, and opendrop refuses
+# to start without one ("Make sure that `owl` is running"). This unit once
+# burned three restarts on that gap and gave up. Wait for the address.
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do ip -6 addr show dev awdl0 scope link 2>/dev/null | grep -q inet6 && exit 0; sleep 0.5; done; echo "awdl0 has no link-local after 30s" >&2; exit 1'
+ExecStart=/usr/bin/python3 @PLUGIN_DIR@/bin/airdrop-serve.py --iface awdl0 --port 8771
+Restart=on-failure
+RestartSec=2s
+# Hardening: it serves HTTPS on one port and writes into one directory.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+# The download folder and the opendrop key dir are the only writable paths;
+# ReadWritePaths is re-evaluated at start, so a config change to download_dir
+# needs the matching path added here (deliberate: the unit declares what it may
+# write). `omdrop dir` writes a drop-in that does exactly that.
+ReadWritePaths=%h/Downloads %h/.opendrop
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET6 AF_INET AF_UNIX AF_NETLINK
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=default.target
