@@ -18,8 +18,10 @@ Notification pops up when a file is received. JPEG or txt files get automaticall
 1. **Broadcom Wi-Fi whose firmware implements AWDL** — the link layer Apple Silicon devices use to talk to each other directly. Verified on the BCM4387 (`14e4:4433`) in the MacBook Pro 16-inch, M1 Pro. Other Apple Broadcom parts are plausible and untested. Intel, MediaTek, and Qualcomm cards cannot do this.
 2. **A patched `brcmfmac` kernel module** provided as a DKMS package, so it survives kernel upgrades.
 
-
+### Alternatives
 If you want AirDrop on non-Apple hardware, look at [owl](https://github.com/seemoo-lab/owl) and [OpenDrop](https://github.com/seemoo-lab/opendrop) instead. They reimplement AWDL in userspace over monitor mode, which works on a different set of cards. omdrop takes the opposite approach and drives the firmware's own implementation.
+
+[LocalSend](https://localsend.org) is another popular option.
 
 ## Install
 
