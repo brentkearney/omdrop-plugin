@@ -1,6 +1,6 @@
 # Omdrop
 
-Receive files from nearby Apple devices, over AirDrop, on Apple Silicon devices running [Omarchy Linux](https://omarchy.org). Sending is not working yet, but will be soon. Also requires the radio to be on the 2.4GHz frequency, so if it is on 5GHz, we automatically switch to 2.4GHz when receiving mode is enabled, and back when it is disabled. We hope to overcome this limitation soon as well.
+Receive files from nearby Apple devices, over AirDrop, on Apple Silicon devices running [Omarchy Linux](https://omarchy.org). Sending is not working yet, but will be soon. Also requires the radio to be on the 2.4GHz frequency, so if it is on 5GHz, we automatically switch to 2.4GHz when receiving mode is enabled, and back to 5Ghz when it is disabled. We hope to overcome this limitation soon as well.
 
 https://github.com/user-attachments/assets/3e415609-6e25-48b0-b55f-58252c65356b
 
@@ -11,7 +11,7 @@ Provides an Omarchy toolbar menu that:
 - Sets the name of your device, as it appears to AirDrop users
 - Sets the file download location (defaults to ~/Downloads)
 
-Notification pops up when a file is received. JPEG or txt files get automatically copied to clipboard. Clicking the notification popup opens the file with the default app for the file type.
+Notification pops up when a file is received. Image or txt files get automatically copied to clipboard. Clicking the notification popup opens the file with the default app for the file type.
 
 ## Requirements
 
@@ -19,9 +19,10 @@ Notification pops up when a file is received. JPEG or txt files get automaticall
 2. **A patched `brcmfmac` kernel module** provided as a DKMS package, so it survives kernel upgrades.
 
 ### Alternatives
-If you want AirDrop on non-Apple hardware, look at [owl](https://github.com/seemoo-lab/owl) and [OpenDrop](https://github.com/seemoo-lab/opendrop) instead. They reimplement AWDL in userspace over monitor mode, which works on a different set of cards. omdrop takes the opposite approach and drives the firmware's own implementation.
+If you want AirDrop on non-Apple hardware, look at [owl](https://github.com/seemoo-lab/owl) and [OpenDrop](https://github.com/seemoo-lab/opendrop) instead. They reimplement AWDL in userspace over monitor mode, which works on a different set of cards. Omdrop takes the opposite approach and drives the firmware's native AWDL implementation.
 
-[LocalSend](https://localsend.org) is another popular option.
+[LocalSend](https://localsend.org) is another popular option
+
 
 ## Install
 
