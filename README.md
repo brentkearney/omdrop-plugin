@@ -2,7 +2,7 @@
 
 Receive files from nearby Apple devices, over AirDrop, on Apple Silicon devices running [Omarchy Linux](https://omarchy.org).
 
-Depends on a [patched wifi driver](https://github.com/brentkearney/omdrop-awdl), which gets installed by the plugin.
+Depends on a [patched wifi driver](https://github.com/brentkearney/omdrop-awdl), which the plugin offers to install on first use.
 
 Provides an Omarchy toolbar menu that:
 - Turns receiving mode on/off
