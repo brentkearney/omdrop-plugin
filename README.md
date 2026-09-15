@@ -1,6 +1,6 @@
 # Omdrop
 
-Receive files from nearby Apple devices, over AirDrop, on Apple Silicon devices running [Omarchy Linux](https://omarchy.org).
+Receive files from nearby Apple devices, over AirDrop, on Apple Silicon devices running [Omarchy Linux](https://omarchy.org). Sending is not working yet, but will be soon. Also requires the radio to be on the 2.4GHz frequency, so if it is on 5GHz, we automatically switch to 2.4GHz when receiving mode is enabled, and back when it is disabled. We hope to overcome this limitation soon as well.
 
 Depends on a [patched wifi driver](https://github.com/brentkearney/omdrop-awdl), which the plugin offers to install on first use.
 
@@ -36,15 +36,15 @@ The widget lands on the right of the bar. Move it with `omarchy bar move netmojo
 omarchy plugin remove netmojo.omdrop
 ```
 
-That leaves the driver package alone. Remove it separately with `pacman -R brcmfmac-awdl-dkms`.
+That leaves the driver package alone. Remove the patched wifi driver separately with `pacman -R brcmfmac-awdl-dkms`.
 
 ## Use
 
 Click the parachute to open the panel. Inside:
 
 - **The switch** turns receiving on and off. Right-clicking the bar icon does the same without opening the panel.
-- **Stay visible for** sets how long a press lasts, from one file to always on.
-- **They see you as** sets the name on your tile. Defaults to this machine's short hostname.
+- **Stay visible for** sets how long receiving mode lasts, from one file to always on.
+- **They see you as** sets the name of your device as others see it. Defaults to this machine's short hostname.
 - **Save files to** sets the download folder. Defaults to `~/Downloads`.
 
 A file that arrives is saved there, copied to the clipboard, and announced in a notification. Click the notification to open it in whatever application handles that file type. Nothing opens on its own.
@@ -59,17 +59,6 @@ omdrop name "Study Mac"
 omdrop dir ~/Drops
 ```
 
-## What the panel tells you, and why it matters
-
-The panel distinguishes three states that look alike but are not:
-
-| It says | It means |
-|---|---|
-| Visible to everyone | Nearby devices can see you and send to you. |
-| Nobody can see you yet | The receiver is running, but nothing is advertising on the radio. |
-| Not available | The radio support is missing. omdrop cannot tell you anything. |
-
-The middle state is the common failure. It means the service layer is healthy and the radio layer is not, which is worth knowing before you ask someone to send you a file.
 
 ## Privileges
 
@@ -79,13 +68,8 @@ Privilege is granted by a named polkit action, `org.omarchy.omdrop.discover`, bo
 
 The `brcmfmac-awdl-dkms` package installs both the helper and that action, so there is no manual privilege step and nothing here asks you to grant root to a script in your home directory.
 
-Plugins run unsandboxed inside the long-running Omarchy shell process. Read the code before you enable it.
-
-## Why the code says "airdrop"
-
-"omdrop" is this project's name. The protocol is Apple's, and its wire identifiers are not ours to rename: the mDNS service type is `_airdrop._tcp`, the endpoints are `/Discover`, `/Ask`, and `/Upload`, and the receiver's configuration key is `ReceiverComputerName`. Those names stay. Rename them and nothing interoperates.
-
-AirDrop is a trademark of Apple Inc. omdrop is not affiliated with, authorized by, or endorsed by Apple.
+## Trademark
+"AirDrop" is a trademark of Apple Inc. Omdrop is an independent project that is not affiliated with, authorized by, or endorsed by Apple.
 
 ## License
 
