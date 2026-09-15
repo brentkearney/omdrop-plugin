@@ -1,34 +1,21 @@
-# omdrop
+# Omdrop
 
-Receive files from nearby Apple devices, from the Omarchy bar. Press the parachute, become visible for a bounded window, and what people send you lands in your Downloads folder.
+Receive files from nearby Apple devices, over AirDrop, on Apple Silicon devices running [Omarchy Linux](https://omarchy.org).
 
-**omdrop works only on Apple Silicon Macs, and needs a patched Wi-Fi driver.** Read [Requirements](#requirements) before installing. On any other machine the bar icon appears struck through and the controls stay hidden.
+Depends on a [patched wifi driver](https://github.com/brentkearney/omdrop-awdl), which gets installed by the plugin.
 
-## What it does
+Provides an Omarchy toolbar menu that:
+- Turns receiving mode on/off
+- Sets the name of your device, as it appears to others
+- Sets the file download location
 
-- Makes this computer visible to nearby Apple devices for a window you choose: one file, a set number of minutes, or until you turn it off.
-- Receives files into a folder you choose.
-- Sets the name those devices show under your tile.
-
-Nothing is sent. omdrop only receives.
+Notification pops up when a file is received. JPEG or txt files get automatically copied to clipboard. Clicking the notification popup opens the file with the default app for the file type.
 
 ## Requirements
 
-omdrop is the interface. Three things have to exist underneath it, and this plugin installs none of them:
+1. **Broadcom Wi-Fi whose firmware implements AWDL** — the link layer Apple Silicon devices use to talk to each other directly. Verified on the BCM4387 (`14e4:4433`) in the MacBook Pro 16-inch, M1 Pro. Other Apple Broadcom parts are plausible and untested. Intel, MediaTek, and Qualcomm cards cannot do this.
+2. **A patched `brcmfmac` kernel module** provided as a DKMS package, so it survives kernel upgrades.
 
-1. **Broadcom Wi-Fi whose firmware implements AWDL** — the link layer Apple devices use to talk to each other directly. Verified on the BCM4387 (`14e4:4433`) in the MacBook Pro 16-inch, M1 Pro. Other Apple Broadcom parts are plausible and untested. Intel, MediaTek, and Qualcomm cards cannot do this.
-2. **A patched `brcmfmac`** exposing that firmware AWDL through vendor command passthrough. Not upstream, and rebuilt on every kernel upgrade — which is why it ships as a DKMS package rather than a file you copy.
-3. **A radio helper and a receiver** on this machine, plus a polkit action letting the helper run without a password prompt.
-
-The driver is a separate project: [omdrop-awdl](https://github.com/brentkearney/omdrop-awdl). Build and install it before this plugin, on Arch or Omarchy:
-
-```bash
-git clone https://github.com/brentkearney/omdrop-awdl.git
-cd omdrop-awdl
-makepkg -si
-```
-
-DKMS rebuilds it whenever a kernel is installed, and it fails toward stock Wi-Fi: the module lands in `updates/dkms/`, which `depmod` prefers over the in-tree driver without deleting it, so a build that breaks costs you AirDrop and never your Wi-Fi link.
 
 If you want AirDrop on non-Apple hardware, look at [owl](https://github.com/seemoo-lab/owl) and [OpenDrop](https://github.com/seemoo-lab/opendrop) instead. They reimplement AWDL in userspace over monitor mode, which works on a different set of cards. omdrop takes the opposite approach and drives the firmware's own implementation.
 
