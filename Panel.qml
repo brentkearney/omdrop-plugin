@@ -312,7 +312,11 @@ Panel {
           var d = JSON.parse(text)
           var missing = d.missing || []
           root.doctorText = missing.length ? missing[0].say : ""
-          root.driverInstallable = missing.some(function(m) { return m.id === "driver" })
+          // Both are installed by the same press: the driver is a package to
+          // build, the support library an AUR package the receiver imports.
+          root.driverInstallable = missing.some(function(m) {
+            return m.id === "driver" || m.id === "library"
+          })
         } catch (e) {
           root.doctorText = ""
           root.driverInstallable = false

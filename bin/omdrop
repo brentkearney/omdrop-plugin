@@ -492,7 +492,7 @@ cmd_setup() {
 # the one thing it can, and the sentence is for the person reading it.
 prereqs_missing() {
   opendrop_installed \
-    || printf 'library\t%s\n' "The AirDrop support library is not installed. It comes with the driver package."
+    || printf 'library\t%s\n' "The AirDrop support library is not installed. The button below installs it along with the driver."
   if [[ ! -x "$DISCOVERABLE" ]]; then
     printf 'driver\t%s\n' "The Wi-Fi driver that makes this computer visible to Apple devices is not installed. It has to be built and installed as an administrator."
   elif [[ ! -e /sys/class/net/awdl0 ]]; then
@@ -530,8 +530,8 @@ print(json.dumps({"ready": not rows,
 # running user-writable code. makepkg refuses to run as root anyway.
 DRIVER_REPO=https://github.com/brentkearney/omdrop-awdl.git
 cmd_install_driver() {
-  if [[ -x "$DISCOVERABLE" ]]; then
-    echo "The driver is already installed. Nothing to do."
+  if [[ -x "$DISCOVERABLE" ]] && opendrop_installed; then
+    echo "The driver and the AirDrop support library are both installed. Nothing to do."
     return 0
   fi
   # Into the cache directory, not a temp dir. Three reasons: someone who has
@@ -543,7 +543,29 @@ cmd_install_driver() {
   # Written as one script so the terminal shows exactly what it will run, and
   # so a user without the launcher can paste the same thing.
   local src="${XDG_CACHE_HOME:-$HOME/.cache}/omdrop/omdrop-awdl"
-  local build="set -e
+  local build="set -e"
+
+  # The receiver imports opendrop outright, and the driver package can only
+  # name it as an optional dependency -- it belongs to the receiver, not the
+  # kernel module, and pacman does not install optdepends. So a user who
+  # installed the driver and nothing else got a working radio and a receiver
+  # that could not start. It is an AUR package; Omarchy ships a helper for
+  # those, and without one there is nothing to do but say the name.
+  if ! opendrop_installed; then
+    if command -v yay >/dev/null 2>&1; then
+      build="$build
+yay -S --needed --noconfirm opendrop"
+    elif command -v paru >/dev/null 2>&1; then
+      build="$build
+paru -S --needed --noconfirm opendrop"
+    else
+      build="$build
+echo 'This also needs the AUR package: opendrop. Install it with your AUR helper, then run: omdrop setup'"
+    fi
+  fi
+
+  if [[ ! -x "$DISCOVERABLE" ]]; then
+    build="$build
 mkdir -p \"\$(dirname '$src')\"
 if [ -d '$src/.git' ]; then
   git -C '$src' pull --ff-only
@@ -552,6 +574,7 @@ else
 fi
 cd '$src'
 makepkg -si"
+  fi
   if ! command -v omarchy-launch-floating-terminal-with-presentation >/dev/null 2>&1; then
     echo "Omdrop requires a patched wifi driver, which requires administrative privilege to install. You will be prompted for your password."
     echo
