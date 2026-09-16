@@ -2,6 +2,8 @@
 
 Receive files from nearby Apple devices, over AirDrop, on Apple Silicon devices running [Omarchy Linux](https://omarchy.org). Sending is not working yet, but will be soon. Also requires the radio to be on the 2.4GHz frequency, so if it is on 5GHz, we automatically switch to 2.4GHz when receiving mode is enabled, and back to 5Ghz when it is disabled. We hope to overcome this limitation soon as well.
 
+This plugin is has been [submitted to the Omarchy Plugin Marketplace](https://github.com/omacom/omarchy-plugin-marketplace/issues/7021), pending review.
+
 https://github.com/user-attachments/assets/3e415609-6e25-48b0-b55f-58252c65356b
 
 Depends on a [patched wifi driver](https://github.com/brentkearney/omdrop-awdl), which the plugin offers to install on first use.
