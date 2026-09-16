@@ -494,7 +494,7 @@ prereqs_missing() {
   opendrop_installed \
     || printf 'library\t%s\n' "The AirDrop support library is not installed. The button below installs it along with the driver."
   if [[ ! -x "$DISCOVERABLE" ]]; then
-    printf 'driver\t%s\n' "The Wi-Fi driver that makes this computer visible to Apple devices is not installed. It has to be built and installed as an administrator."
+    printf 'driver\t%s\n' "The Wi-Fi driver that makes this computer visible to Apple devices is not installed. It has to be installed as an administrator."
   elif [[ ! -e /sys/class/net/awdl0 ]]; then
     printf 'radio\t%s\n' "The driver is installed but its Apple-compatible radio is not running yet, so nobody can see this computer. Restarting usually brings it up."
   fi
@@ -529,6 +529,8 @@ print(json.dumps({"ready": not rows,
 # than pkexec'ing a build script out of a plugin clone, which would be root
 # running user-writable code. makepkg refuses to run as root anyway.
 DRIVER_REPO=https://github.com/brentkearney/omdrop-awdl.git
+# The package name a repository would carry it under, and the fallback source.
+DRIVER_PKG=brcmfmac-awdl-dkms
 # The exact driver commit this release of the plugin builds. A branch name
 # would let the built source drift away from what anyone reviewed -- including
 # the marketplace, whose baseline refuses an unpinned remote build -- so the
@@ -571,8 +573,22 @@ echo 'This also needs the AUR package: opendrop. Install it with your AUR helper
     fi
   fi
 
+  # A repository that already carries the driver makes building it pointless:
+  # pacman installs a signed package in seconds, with no toolchain, no compile
+  # output to read, and nothing fetched at install time that a reviewer has not
+  # seen. Building stays for everyone whose repositories do not have it -- a
+  # plain Asahi Arch install, or before the package reaches their architecture.
+  #
+  # `pacman -Si` reads the sync databases already on disk. It deliberately does
+  # not refresh them: -Sy on its own is how partial upgrades happen, and a user
+  # who asked to install AirDrop did not ask to move their system's package
+  # state. A database that predates the package simply takes the build path.
   if [[ ! -x "$DISCOVERABLE" ]]; then
-    build="$build
+    if pacman -Si "$DRIVER_PKG" >/dev/null 2>&1; then
+      build="$build
+sudo pacman -S --needed --noconfirm $DRIVER_PKG"
+    else
+      build="$build
 mkdir -p \"\$(dirname '$src')\"
 if [ -d '$src/.git' ]; then
   git -C '$src' fetch --quiet origin
@@ -581,6 +597,7 @@ else
 fi
 echo 'Building driver commit $DRIVER_COMMIT'
 git -C '$src' checkout --detach 0a7303da01757f7bdfa91be13b2b69b2c4d3b7fd && makepkg --dir '$src' -si"
+    fi
   fi
   if ! command -v omarchy-launch-floating-terminal-with-presentation >/dev/null 2>&1; then
     echo "Omdrop requires a patched wifi driver, which requires administrative privilege to install. You will be prompted for your password."
@@ -589,7 +606,7 @@ git -C '$src' checkout --detach 0a7303da01757f7bdfa91be13b2b69b2c4d3b7fd && make
     printf '\n%s\n\n' "$build"
     return 0
   fi
-  echo "Opening a terminal to build and install the driver."
+  echo "Opening a terminal to install the driver."
   omarchy-launch-floating-terminal-with-presentation \
     "echo 'Omdrop requires a patched wifi driver, which requires administrative privilege to install. You will be prompted for your password.'; echo; $build"
 }
