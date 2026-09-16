@@ -17,13 +17,18 @@ Notification pops up when a file is received. Image or txt files get automatical
 
 ## Requirements
 
-1. **Broadcom Wi-Fi whose firmware implements AWDL** — the link layer Apple Silicon devices use to talk to each other directly. Verified on the BCM4387 (`14e4:4433`) in the MacBook Pro 16-inch, M1 Pro. Other Apple Broadcom parts are plausible and untested. Intel, MediaTek, and Qualcomm cards cannot do this.
-2. **A patched `brcmfmac` kernel module** provided as a DKMS package, so it survives kernel upgrades.
-
+1. **Broadcom Wi-Fi whose firmware implements AWDL** — the link layer Apple that devices use to talk to each other directly. Verified on the BCM4387 (`14e4:4433`) in the MacBook Pro 16-inch, M1 Pro. Other Apple Broadcom parts are plausible and untested. Intel, MediaTek, and Qualcomm cards cannot do this. Apple models that ship with the BCM4387:
+ - MacBook Pro 14" and 16", 2021 — M1 Pro / M1 Max (j314/j316, t600x)
+ - Mac Studio, 2022 — M1 Max / M1 Ultra (j375)
+ - MacBook Air 13", 2022 — M2 (j413)
+ - MacBook Pro 13", 2022 — M2 (j493)
+ - Mac mini, 2023 — M2 (j473) [INFERENCE]
+2. **A `brcmfmac` kernel module that enables AWDL** — One is provided via the [omdrop-awdl package](https://github.com/brentkearney/omdrop-awdl), installed at first use of the plugin.
+   
 ### Alternatives
 If you want AirDrop on non-Apple hardware, look at [owl](https://github.com/seemoo-lab/owl) and [OpenDrop](https://github.com/seemoo-lab/opendrop) instead. They reimplement AWDL in userspace over monitor mode, which works on a different set of cards. Omdrop takes the opposite approach and drives the firmware's native AWDL implementation.
 
-[LocalSend](https://localsend.org) is another popular option
+[LocalSend](https://localsend.org) is a cross-platform file sharing protocol that ships with Omarchy. It requires all devices (iPhone, etc) to install it; it is not compatible with native AirDrop, it is an open alternative to it.
 
 
 ## Install
