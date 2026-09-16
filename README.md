@@ -80,6 +80,13 @@ Privilege is granted by a named polkit action, `org.omarchy.omdrop.discover`, bo
 
 The `brcmfmac-awdl-dkms` package installs both the helper and that action, so there is no manual privilege step and nothing here asks you to grant root to a script in your home directory.
 
+## Problems and Contributions
+If you encounter a bug, or have a feature request, [create an Issue](https://github.com/brentkearney/omdrop-plugin/issues) here. Or better yet, have your agent fix or implement it, and [create a Pull Request](https://github.com/brentkearney/omdrop-plugin/pulls). I'm happy to review and merge.
+
+#### Known Bugs / Limitations
+- Enabling Omdrop takes 30 - 60s; this is in part due to switching the radio from 5Ghz to 2.4Ghz frequencies. I'm about 60% done reverse engineering the functionality of AWDL in 5Ghz mode, to be completed as time and token budget allows. Feel free to contribute PRs to the [omdrop-awdl](https://github.com/brentkearney/omdrop-awdl/) for this.
+- No sending capability - I'm about 80% done reverse engineering native AirDrop sending on the BCM4387. Feel free to contribute PRs to the [omdrop-awdl](https://github.com/brentkearney/omdrop-awdl/) for this.
+
 ## Trademark
 "AirDrop" is a trademark of Apple Inc. Omdrop is an independent project that is not affiliated with, authorized by, or endorsed by Apple.
 
