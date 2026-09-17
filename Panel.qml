@@ -62,6 +62,10 @@ Panel {
   readonly property string reasonText: {
     switch (blockedReason) {
     case "no_awdl0":   return "The AWDL interface is missing. The Wi-Fi driver needs loading."
+    // The window is open and the radio is working; the Wi-Fi has simply been
+    // moved to a band where Apple devices cannot see this computer. Worth
+    // saying plainly, because everything else looks fine from here.
+    case "offband":    return "Your Wi-Fi moved to a band Apple devices cannot find this computer on. Omdrop is moving it back."
     // The retry advice this used to carry was disproved by five identical
     // failures: parked-with-a-template-loaded cannot be cleared from userspace,
     // so a retry cannot succeed. The CLI's own message names the way out, and
