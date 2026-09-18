@@ -82,9 +82,9 @@ Panel {
   // receiving=true, and the headline of a turn-ON says "Turning off".
   property bool turningOn: false
   property int busyElapsed: 0
-  // The radio gate takes 15-60s and roughly half of enables have to retry, so
-  // silence here is indistinguishable from a hang. Count up once it is long
-  // enough to be worth saying, and never claim a total we cannot predict.
+  // The radio gate takes about 10 s, and `omdrop on` returns before the radio
+  // has settled, so silence here is indistinguishable from a hang. Count up
+  // once it is long enough to be worth saying.
   property string busyDots: "."
 
   Timer {
@@ -108,10 +108,10 @@ Panel {
   // struck-through icon and the "Not available" copy are for.
   readonly property bool usable: installed && visibility !== -1
 
-  // The receiver comes up in a moment; the radio takes 15-60s of gating after
-  // that, and `omdrop on` returns before it finishes. So there is a stretch
-  // where the window is genuinely open and nobody can see us yet -- which is
-  // normal, and must not be reported in the same words as a radio that failed.
+  // The receiver comes up in a moment and the radio gate takes about 10 s
+  // after that, so there is a short stretch where the window is genuinely
+  // open and nobody can see us yet -- which is normal, and must not be
+  // reported in the same words as a radio that failed.
   // Counted, not computed from a clock: a binding on Date.now() never
   // re-evaluates, so it would latch at whatever it read first.
   property int settleElapsed: 0
@@ -208,7 +208,7 @@ Panel {
   readonly property string detailText: {
     if (!usable) return doctorText !== "" ? doctorText
                                           : "Needs the AWDL radio support this plugin's README describes."
-    if (settling) return "The radio takes up to a minute to come up."
+    if (settling) return "The radio takes a few seconds to come up."
     if (lastError !== "") return lastError
     if (reasonText !== "") return reasonText
     if (!receiving) return "Nearby Apple devices cannot see this computer."
