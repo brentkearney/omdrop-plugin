@@ -746,6 +746,7 @@ Nothing was started; your connection is unchanged."
     fi
     if ! radio_up; then
       systemctl --user stop "$UNIT" >/dev/null 2>&1
+      [[ -x "$DISCOVERABLE" ]] && pkexec "$DISCOVERABLE" stop >/dev/null 2>&1
       band_restore
       die "${RADIO_ERR:-The AirDrop radio could not be started.}"
     fi
