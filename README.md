@@ -61,6 +61,8 @@ pacman -R brcmfmac-awdl-dkms
 
 ## Use
 
+### Receiving
+
 Click the parachute icon to open the panel. Inside:
 
 - **The switch** turns receiving on and off. Right-clicking the bar icon does the same without opening the panel.
@@ -80,6 +82,24 @@ omdrop name "Study Mac"
 omdrop dir ~/Drops
 ```
 
+### Sending
+
+Sending works, and it is proven to both a Mac and an iPhone, but it is a command line at the moment: the panel has no send button yet. The tools come with the [driver package](https://github.com/brentkearney/omdrop-awdl), and they need a receive window open first, because that is what fills the peer table they read.
+
+```bash
+omdrop on 10m                                   # a window, so peers are registered
+/usr/lib/omdrop/send-to-peer --list             # who is within earshot, and where
+/usr/lib/omdrop/send-to-peer ~/photo.jpg        # the only peer heard
+/usr/lib/omdrop/send-to-peer --mac e2:9d:.. ~/photo.jpg
+/usr/lib/omdrop/send-to-peer --wait 120 ~/photo.jpg
+```
+
+Set the receiving Apple device to **Everyone**, or **Everyone for 10 Minutes** on iOS. Contacts Only is not supported: it rejects a self-signed certificate before any transfer starts. The recipient sees a prompt naming this computer and has to accept it, exactly as they would from an Apple device.
+
+**A Mac** answers immediately, whether or not its Finder AirDrop window is open.
+
+**An iPhone** only listens in short bursts, so a single attempt is a coin flip. `--wait` polls for the moment it starts listening and sends then. Opening a share sheet on the phone, or receiving anything on it, brings its listener up.
+
 
 ## Privileges
 
@@ -95,7 +115,8 @@ The UFW exception belongs to the receiver, not the driver package. Omdrop runs `
 If you encounter a bug, or have a feature request, [create an Issue](https://github.com/brentkearney/omdrop-plugin/issues) here. Or better yet, have your agent fix or implement it, and [create a Pull Request](https://github.com/brentkearney/omdrop-plugin/pulls). I'm happy to review and merge.
 
 #### Known Bugs / Limitations
-- No sending capability - I'm about 80% done reverse engineering native AirDrop sending on the BCM4387. Feel free to contribute PRs to the [omdrop-awdl](https://github.com/brentkearney/omdrop-awdl/) for this.
+- No send button in the panel. Sending itself works from the command line, as [Use](#sending) describes; the UI for it is not built yet. PRs welcome, here for the panel or in [omdrop-awdl](https://github.com/brentkearney/omdrop-awdl/) for the sender.
+- Sending to an iPhone needs `--wait`, because iOS only keeps an AirDrop listener up in short bursts. A Mac has no such quirk.
 
 ## Trademark
 "AirDrop" is a trademark of Apple Inc. Omdrop is an independent project that is not affiliated with, authorized by, or endorsed by Apple.
