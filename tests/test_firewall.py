@@ -98,7 +98,6 @@ for arg do printf '<%s>\\n' "$arg" >> "$CAPTURE"; done
 
     def test_dependency_installer_runs_firewall_setup_in_the_same_terminal(self):
         self.command("python3", "#!/bin/sh\nexit 1\n")
-        self.command("yay", "#!/bin/sh\nexit 0\n")
         self.command(
             "omarchy-launch-floating-terminal-with-presentation",
             """#!/bin/sh
@@ -110,9 +109,10 @@ printf '%s' "$1" > "$CAPTURE"
 
         self.assertEqual(result.returncode, 0, result.stderr)
         command = self.capture.read_text()
-        self.assertIn("yay -S --needed --noconfirm opendrop", command)
+        # Last, so sudo is authenticated by the package work ahead of it
+        # rather than prompting a second time.
         self.assertIn("firewall install", command)
-        self.assertLess(command.index("yay -S"), command.index("firewall install"))
+        self.assertLess(command.index("makepkg"), command.index("firewall install"))
 
 
 if __name__ == "__main__":

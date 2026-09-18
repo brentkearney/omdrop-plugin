@@ -42,6 +42,10 @@ The widget lands on the right of the bar. Move it with `omarchy bar move netmojo
 
 On first use of the plugin, the panel opens a terminal to prompt for a password to install the [patched wifi driver](https://github.com/brentkearney/omdrop-awdl) and update your firewall rule to allow connections on the new virtual interface (TCP 8771 on `awdl0`, to/from an IPv6 link-local address). 
 
+Both dependencies are pinned to exact revisions, so what gets built is the code this release was tested against: the driver at a named commit of [omdrop-awdl](https://github.com/brentkearney/omdrop-awdl), and the AirDrop support library from a named commit of the `opendrop` AUR recipe, whose source tarball `makepkg` verifies against a recorded checksum. Neither is installed by bare package name.
+
+`opendrop` declares `owlink`, the userspace AWDL daemon its own sender uses. Omdrop drives AWDL in firmware and never runs it, so the library is installed with `--assume-installed owlink` rather than pulling in a package that could not be pinned.
+
 `omdrop --version` reports what version you are running; include it in any bug report.
 
 ## Remove
