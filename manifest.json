@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "netmojo.omdrop",
   "name": "omdrop",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "author": "Brent Kearney",
   "license": "MIT",
   "description": "Receive files from nearby Apple devices over AirDrop, on Apple Silicon Macs running Omarchy.",
