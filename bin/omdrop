@@ -139,13 +139,20 @@ receiving() {
 }
 
 
-# One-file mode lives in the watcher's arguments, nowhere else: `cmd_on` starts
-# it with --once and it turns us off after the first arrival. Reading it back
-# off the unit keeps `status` honest without a second piece of state to drift.
-watch_is_once() {
+# The shape of the window lives in the watcher's arguments, nowhere else:
+# `cmd_on` starts it with --once or --window <span> before the radio, so
+# `status` can name the window while the radio is still coming up, and before
+# the deadline exists. Reading it back off the unit keeps `status` honest
+# without a second piece of state to drift.
+watch_mode() {
   local exec
   exec=$(systemctl --user show "$WATCH.service" -p ExecStart --value 2>/dev/null) || return 1
-  [[ "$exec" == *"watch --once"* ]]
+  case "$exec" in
+    *"watch --once"*)   printf 'once\n' ;;
+    *"watch --window"*) printf 'timed\n' ;;
+    *watch*)            printf 'forever\n' ;;
+    *) return 1 ;;
+  esac
 }
 
 # Seconds until the pending window closes, or nothing at all when no window is
@@ -577,31 +584,24 @@ cmd_on() {
 
   cancel_window
 
-  # The window and the arrival watcher are armed BEFORE the receiver and the
-  # radio, because `status` reads the mode off these two units: a timed start
-  # whose timer is not up yet reads as "forever", and a one-file start reads
-  # the same until its watcher carries --once. The panel's duration row
-  # followed that to its right-hand stop, "Until I turn it off", for the whole
-  # length of the radio gate -- 15-60 s -- and then snapped back to the stop
-  # the user chose (reported 2026-09-18).
+  # The watcher goes up BEFORE the radio and it carries the shape of the
+  # window in its arguments, because `status` reads the mode off this unit: a
+  # start whose units are not up yet would otherwise read as "forever", and the
+  # panel's duration row followed that to its right-hand stop, "Until I turn it
+  # off", for the whole length of the radio gate before snapping back (reported
+  # 2026-09-18).
   #
-  # Arming first also makes the two deadlines agree: the radio's own window
-  # starts when `awdl-discoverable start $secs` runs, so a timer armed after
-  # the gate fires later than the radio goes dark.
-  #
-  # Nothing is listening or advertising yet, so an armed window here cannot
-  # expose anything, and every failure path below clears it.
-  case "$mode" in
-    timed)
-      systemd-run --user --quiet --on-active="$dur" --unit="$WINDOW" "$SELF" off \
-        || die "the $dur window could not be armed -- nothing was turned on" ;;
-  esac
-
-  # One watcher either way: it announces every file that lands, and in "once"
-  # mode turns us off after the first one. It follows the receiver's journal,
-  # which it can do before the receiver exists.
+  # The deadline itself is NOT armed here. A clock that starts before the radio
+  # is up spends the gate -- up to 30 s -- counting down a window nobody can
+  # send to: "1 minute" was down to 35 seconds by the time the tile appeared
+  # (reported 2026-09-18). It is armed once receiving actually works, below.
+  # Until then `remaining` is empty and the row shows the duration as a label,
+  # which is exactly what it means.
   local watchArgs=()
-  [[ "$mode" == once ]] && watchArgs=(--once)
+  case "$mode" in
+    once)  watchArgs=(--once) ;;
+    timed) watchArgs=(--window "$dur") ;;
+  esac
   systemd-run --user --quiet --unit="$WATCH" "$SELF" watch "${watchArgs[@]}" \
     || echo "receiving, but nothing is watching for arrivals" >&2
 
@@ -669,6 +669,17 @@ cmd_on() {
     fi
   fi
 
+  # Receiving works from here, so this is where the clock the user set starts.
+  # The radio's own deadline was set to the same span when the gate began, so
+  # it now runs out a gate's worth of seconds early; ask it for the window
+  # again so both ends agree on when this closes.
+  case "$mode" in
+    timed)
+      systemd-run --user --quiet --on-active="$dur" --unit="$WINDOW" "$SELF" off \
+        || die "receiving, but the $dur window could not be armed -- turn it off yourself"
+      [[ -x "$DISCOVERABLE" ]] && pkexec "$DISCOVERABLE" start "$secs" >/dev/null 2>&1 ;;
+  esac
+
   cmd_status
 }
 
@@ -693,9 +704,13 @@ cmd_status() {
   local on=false left= vis=unknown mode=off
   receiving && on=true
   if [[ "$on" == true ]]; then
-    mode=forever
-    watch_is_once && mode=once
-    systemctl --user is-active "$WINDOW.timer" >/dev/null 2>&1 && mode=timed
+    # The watcher answers for every window it started. Without one -- it was
+    # killed, or this receiver was started by hand -- the timer is all there is.
+    mode=$(watch_mode) || mode=
+    if [[ -z "$mode" ]]; then
+      mode=forever
+      systemctl --user is-active "$WINDOW.timer" >/dev/null 2>&1 && mode=timed
+    fi
   fi
   left=$(window_remaining) || left=
   local reason= rxproven=0
@@ -760,7 +775,15 @@ print(json.dumps({
 # unrelated download landing in the same directory.
 cmd_watch() {
   local once=0
-  [[ "${1:-}" == --once ]] && once=1
+  while (( $# )); do
+    case "$1" in
+      --once)   once=1; shift ;;
+      # Declaration only: `status` reads the window's span off this unit's
+      # arguments, and the deadline itself is a systemd timer.
+      --window) shift; (( $# )) && shift ;;
+      *)        shift ;;
+    esac
+  done
   local dir; dir=$(effective_dir)
   echo "omdrop watch: following $UNIT, saving into $dir"
   journalctl --user -u "$UNIT" -f -n 0 -o cat 2>/dev/null | while IFS= read -r line; do

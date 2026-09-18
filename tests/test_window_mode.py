@@ -56,6 +56,7 @@ exit 0
 
     ONCE = "{ path=/usr/bin/omdrop ; argv[]=/usr/bin/omdrop watch --once ; ignore_errors=no }"
     OPEN = "{ path=/usr/bin/omdrop ; argv[]=/usr/bin/omdrop watch ; ignore_errors=no }"
+    TIMED = "{ path=/usr/bin/omdrop ; argv[]=/usr/bin/omdrop watch --window 10m ; ignore_errors=no }"
 
     def test_a_one_file_window_is_reported_as_one_file(self):
         # The regression: this answered "forever", so the panel's duration row
@@ -65,8 +66,15 @@ exit 0
     def test_an_unbounded_window_is_still_reported_as_unbounded(self):
         self.assertEqual(self.status(self.OPEN)["mode"], "forever")
 
-    def test_a_timed_window_outranks_both(self):
-        self.assertEqual(self.status(self.OPEN, timer_active=True)["mode"], "timed")
+    def test_a_timed_window_is_named_before_its_clock_exists(self):
+        # The window is armed once receiving works, so for the length of the
+        # radio gate the watcher is the only thing that knows the shape.
+        self.assertEqual(self.status(self.TIMED)["mode"], "timed")
+
+    def test_without_a_watcher_the_timer_answers(self):
+        # A receiver someone started by hand, or a watcher that was killed.
+        self.assertEqual(self.status("", timer_active=True)["mode"], "timed")
+        self.assertEqual(self.status("")["mode"], "forever")
 
 
 if __name__ == "__main__":
