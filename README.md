@@ -1,6 +1,6 @@
 # Omdrop
 
-Receive files from nearby Apple devices, over AirDrop, on Apple Silicon devices running [Omarchy Linux](https://omarchy.org). Sending is not working yet, but will be soon. Also requires the radio to be on the 2.4GHz frequency, so if it is on 5GHz, we automatically switch to 2.4GHz when receiving mode is enabled, and back to 5Ghz when it is disabled. We hope to overcome this limitation soon as well.
+Receive files from nearby Apple devices over AirDrop on Apple Silicon devices running [Omarchy Linux](https://omarchy.org). Sending is not working yet.
 
 This plugin is has been [submitted to the Omarchy Plugin Marketplace](https://github.com/omacom/omarchy-plugin-marketplace/issues/7021), pending review.
 
@@ -91,7 +91,6 @@ The UFW exception belongs to the receiver, not the driver package. Omdrop runs `
 If you encounter a bug, or have a feature request, [create an Issue](https://github.com/brentkearney/omdrop-plugin/issues) here. Or better yet, have your agent fix or implement it, and [create a Pull Request](https://github.com/brentkearney/omdrop-plugin/pulls). I'm happy to review and merge.
 
 #### Known Bugs / Limitations
-- Enabling Omdrop takes 30 - 60s; this is in part due to switching the radio from 5Ghz to 2.4Ghz frequencies. I'm about 60% done reverse engineering the functionality of AWDL in 5Ghz mode, to be completed as time and token budget allows. Feel free to contribute PRs to the [omdrop-awdl](https://github.com/brentkearney/omdrop-awdl/) for this.
 - No sending capability - I'm about 80% done reverse engineering native AirDrop sending on the BCM4387. Feel free to contribute PRs to the [omdrop-awdl](https://github.com/brentkearney/omdrop-awdl/) for this.
 
 ## Trademark
