@@ -577,6 +577,34 @@ cmd_on() {
 
   cancel_window
 
+  # The window and the arrival watcher are armed BEFORE the receiver and the
+  # radio, because `status` reads the mode off these two units: a timed start
+  # whose timer is not up yet reads as "forever", and a one-file start reads
+  # the same until its watcher carries --once. The panel's duration row
+  # followed that to its right-hand stop, "Until I turn it off", for the whole
+  # length of the radio gate -- 15-60 s -- and then snapped back to the stop
+  # the user chose (reported 2026-09-18).
+  #
+  # Arming first also makes the two deadlines agree: the radio's own window
+  # starts when `awdl-discoverable start $secs` runs, so a timer armed after
+  # the gate fires later than the radio goes dark.
+  #
+  # Nothing is listening or advertising yet, so an armed window here cannot
+  # expose anything, and every failure path below clears it.
+  case "$mode" in
+    timed)
+      systemd-run --user --quiet --on-active="$dur" --unit="$WINDOW" "$SELF" off \
+        || die "the $dur window could not be armed -- nothing was turned on" ;;
+  esac
+
+  # One watcher either way: it announces every file that lands, and in "once"
+  # mode turns us off after the first one. It follows the receiver's journal,
+  # which it can do before the receiver exists.
+  local watchArgs=()
+  [[ "$mode" == once ]] && watchArgs=(--once)
+  systemd-run --user --quiet --unit="$WATCH" "$SELF" watch "${watchArgs[@]}" \
+    || echo "receiving, but nothing is watching for arrivals" >&2
+
 
   # Receiver FIRST when it can start, radio second. Run 20260912T222217Z is the
   # argument for the order: the window advertised 16 s before the receiver was
@@ -620,35 +648,27 @@ cmd_on() {
 
   if (( receiver_first )); then
     if ! start_receiver; then
+      cancel_window
       die "The AirDrop receiver would not start."
     fi
     if ! radio_up; then
+      cancel_window
       systemctl --user stop "$UNIT" >/dev/null 2>&1
       [[ -x "$DISCOVERABLE" ]] && pkexec "$DISCOVERABLE" stop >/dev/null 2>&1
       die "${RADIO_ERR:-The AirDrop radio could not be started.}"
     fi
   else
     if ! radio_up; then
+      cancel_window
       die "${RADIO_ERR:-The AirDrop radio could not be started.}"
     fi
     if ! start_receiver; then
+      cancel_window
       [[ -x "$DISCOVERABLE" ]] && pkexec "$DISCOVERABLE" stop >/dev/null 2>&1
       die "The AirDrop receiver would not start."
     fi
   fi
 
-  case "$mode" in
-    timed)
-      systemd-run --user --quiet --on-active="$dur" --unit="$WINDOW" "$SELF" off \
-        || die "receiving, but the $dur window could not be armed -- turn it off yourself" ;;
-  esac
-
-  # One watcher either way: it announces every file
-  # that lands, and in "once" mode turns us off after the first one.
-  local watchArgs=()
-  [[ "$mode" == once ]] && watchArgs=(--once)
-  systemd-run --user --quiet --unit="$WATCH" "$SELF" watch "${watchArgs[@]}" \
-    || echo "receiving, but nothing is watching for arrivals" >&2
   cmd_status
 }
 

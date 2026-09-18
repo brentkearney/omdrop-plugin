@@ -20,8 +20,11 @@ import os
 import plistlib
 import pwd
 import re
+import signal
 import stat as stat_mod
+import struct
 import sys
+import time
 import unicodedata
 import zlib
 
@@ -168,9 +171,38 @@ class ThreadingHTTPServerV6(ThreadingHTTPServer):
     # A connection that opens and then carries no request is the signature of a
     # sender that gave up or a TLS handshake we lost -- invisible in the
     # request log, which only fires once a request line parses.
+    def __init__(self, *a, **k):
+        # Sessions still open at shutdown, so stopping can free the port.
+        self.live = set()
+        super().__init__(*a, **k)
+
     def process_request(self, request, client_address):
         logging.info('connection from [%s]:%s', client_address[0], client_address[1])
+        self.live.add(request)
         super().process_request(request, client_address)
+
+    def shutdown_request(self, request):
+        self.live.discard(request)
+        super().shutdown_request(request)
+
+    # A sender keeps its TLS session open after a transfer, and when this
+    # process stops the kernel closes that session with a FIN. An iPhone that
+    # has already left the AWDL link never acknowledges it, so the socket sits
+    # in FIN_WAIT_1 holding port 8771 for minutes -- and the next start cannot
+    # bind, which is exactly what "turn it off and on again" does after a
+    # transfer (observed 2026-09-18 03:11Z, 23 restart attempts).
+    #
+    # A reset costs nothing here: the transfer is over, and the peer is either
+    # gone or about to be told we are.
+    def reset_sessions(self):
+        for sock in list(self.live):
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                                struct.pack('ii', 1, 0))
+                sock.close()
+            except OSError:
+                pass
+            self.live.discard(sock)
 
     def handle_error(self, request, client_address):
         # sharingd closes the keep-alive TLS session with a RST once the
@@ -430,19 +462,47 @@ config = AirDropConfig(host_name=args.host, computer_name=NAME,
                        computer_model=MODEL, server_port=args.port,
                        airdrop_dir=args.keys, service_id=sid,
                        interface=args.iface, debug=True)
-server = AirDropServer(config)
-if config.port != args.port:
-    logging.error('port %d busy, opendrop moved to %d -- the announcer says %d',
-                  args.port, config.port, args.port)
+
+# opendrop answers a busy port by quietly moving to the next one, which
+# nothing advertises -- a receiver nobody can reach. Waiting is what the user
+# wants instead: the usual reason is the previous run's socket still unwinding,
+# which clears in seconds now that stopping resets its sessions.
+def bind_server(attempts=5, pause=2):
+    for attempt in range(1, attempts + 1):
+        config.port = args.port
+        candidate = AirDropServer(config)
+        if config.port == args.port:
+            return candidate
+        candidate.http_server.server_close()
+        logging.warning('port %d still held; retry %d of %d', args.port,
+                        attempt, attempts)
+        time.sleep(pause)
+    return None
+
+
+server = bind_server()
+if server is None:
+    logging.error('port %d is still held by something else after waiting; '
+                  'the announcer only ever names %d', args.port, args.port)
     sys.exit(1)
 logging.info('config %s: %s', args.config, ', '.join(f'{k}={v!r}' for k, v in sorted(_cfg.items())) or 'absent (defaults)')
 logging.info('serving %s._airdrop._tcp.local as %s (%s) on [%s]:%d, receiving into %s',
              sid, NAME, MODEL, server.ip_addr, config.port, DEST)
 if args.announce:
     server.start_service()
+
+# systemd stops this unit with SIGTERM, whose default action skips every
+# cleanup below -- including the session reset that frees the port.
+def on_term(signum, frame):
+    raise KeyboardInterrupt
+
+
+signal.signal(signal.SIGTERM, on_term)
 try:
     server.start_server()
 except KeyboardInterrupt:
     pass
 finally:
     server.stop()
+    server.http_server.reset_sessions()
+    server.http_server.server_close()
