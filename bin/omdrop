@@ -115,6 +115,7 @@ omdrop -- receive files from nearby Apple devices
                     see, and this computer's certificate. Safe to run again.
   doctor [--json]   what is still missing before this can receive
   install-driver    build and install the Wi-Fi driver, in a terminal you watch
+  firewall ACTION   install or remove Omdrop's narrow UFW receiver rule
   version           the plugin version, for bug reports
 
 Examples:
@@ -523,6 +524,53 @@ print(json.dumps({"ready": not rows,
   printf 'Ready to receive.\n'
 }
 
+# AirDrop data reaches the ordinary user receiver through one kernel socket.
+# UFW's default-drop policy sees that TCP traffic after the AWDL data path has
+# done its job, so a healthy radio can advertise while every sender's SYN is
+# discarded. This is the only firewall exception Omdrop needs: IPv6 link-local
+# peers, to our IPv6 link-local address, on awdl0, TCP 8771.
+#
+# The DKMS package deliberately does not own this rule. It supplies a radio
+# that other AWDL applications can use; opening an application port belongs to
+# the application. `install-driver` calls this command in the same visible
+# terminal after its package work, which normally reuses the same sudo
+# authentication without putting Omdrop policy in the driver package.
+UFW_RULE=(allow in on awdl0 from fe80::/10 to fe80::/10 port 8771 proto tcp
+          comment "Omdrop AirDrop receiver")
+
+ufw_active() {
+  command -v ufw >/dev/null 2>&1 \
+    && systemctl is-active --quiet ufw.service
+}
+
+cmd_firewall() {
+  local action=${1:-}
+  case "$action" in
+    install)
+      if ! command -v ufw >/dev/null 2>&1; then
+        echo "UFW is not installed; no UFW rule is needed."
+        return 0
+      fi
+      if ! systemctl is-active --quiet ufw.service; then
+        echo "UFW is not active; Omdrop did not change its configuration."
+        return 0
+      fi
+      echo "Allowing AirDrop receiver traffic only on awdl0, from IPv6 link-local peers, to TCP 8771."
+      sudo ufw "${UFW_RULE[@]}"
+      ;;
+    remove)
+      if ! command -v ufw >/dev/null 2>&1; then
+        echo "UFW is not installed; there is no Omdrop UFW rule to remove."
+        return 0
+      fi
+      sudo ufw --force delete "${UFW_RULE[@]}"
+      ;;
+    *)
+      die "usage: omdrop firewall install|remove"
+      ;;
+  esac
+}
+
 # Installing a kernel module is not something a bar widget may do quietly. This
 # follows Omarchy's own pattern for installing from a UI -- a floating terminal
 # running the command, the user's own sudo prompt, all output visible -- rather
@@ -539,6 +587,8 @@ DRIVER_PKG=brcmfmac-awdl-dkms
 # driver: the full 40 characters, because a short SHA is not a pin.
 DRIVER_COMMIT=0a7303da01757f7bdfa91be13b2b69b2c4d3b7fd
 cmd_install_driver() {
+  local self_q
+  printf -v self_q '%q' "$0"
   if [[ -x "$DISCOVERABLE" ]] && opendrop_installed; then
     echo "The driver and the AirDrop support library are both installed. Nothing to do."
     return 0
@@ -598,6 +648,14 @@ fi
 echo 'Building driver commit $DRIVER_COMMIT'
 git -C '$src' checkout --detach 0a7303da01757f7bdfa91be13b2b69b2c4d3b7fd && makepkg --dir '$src' -si"
     fi
+  fi
+
+  # Keep the receiver's firewall policy in this plugin, not in the reusable
+  # driver package. Running it in the same terminal means sudo normally reuses
+  # the authentication from pacman/makepkg instead of asking a second time.
+  if ufw_active; then
+    build="$build
+$self_q firewall install"
   fi
   if ! command -v omarchy-launch-floating-terminal-with-presentation >/dev/null 2>&1; then
     echo "Omdrop requires a patched wifi driver, which requires administrative privilege to install. You will be prompted for your password."
@@ -1029,6 +1087,7 @@ case "${1:-status}" in
   setup)  shift; cmd_setup "$@" ;;
   doctor) shift; cmd_doctor "$@" ;;
   install-driver) shift; cmd_install_driver ;;
+  firewall) shift; cmd_firewall "$@" ;;
   act)    shift; cmd_act "$@" ;;
   watch)  shift; cmd_watch "$@" ;;
   handle) shift; cmd_handle "$@" ;;
