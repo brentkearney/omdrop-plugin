@@ -45,8 +45,6 @@ Panel {
   property string deviceName: ""
   property string downloadDir: ""
   property string blockedReason: ""
-  property string band: ""
-  property bool bandHeld: false
 
   property string lastError: ""
 
@@ -62,10 +60,6 @@ Panel {
   readonly property string reasonText: {
     switch (blockedReason) {
     case "no_awdl0":   return "The AWDL interface is missing. The Wi-Fi driver needs loading."
-    // The window is open and the radio is working; the Wi-Fi has simply been
-    // moved to a band where Apple devices cannot see this computer. Worth
-    // saying plainly, because everything else looks fine from here.
-    case "offband":    return "Your Wi-Fi moved to a band Apple devices cannot find this computer on. Omdrop is moving it back."
     // The retry advice this used to carry was disproved by five identical
     // failures: parked-with-a-template-loaded cannot be cleared from userspace,
     // so a retry cannot succeed. The CLI's own message names the way out, and
@@ -180,12 +174,6 @@ Panel {
   }
   readonly property color barIconColor: receiving ? barForeground : Qt.darker(barForeground, 1.55)
 
-  // A band move is its own phase, and it is the slow one: NetworkManager tears
-  // the connection down and back up. Measured on this hardware, 2.5-4s
-  // typically and occasionally 30-50s when the 2.4 scan is cold. Saying
-  // "Making you visible" through that is not wrong, but it tells the user
-  // nothing about why their Wi-Fi just went away.
-  readonly property bool switchingBand: busy && turningOn && bandHeld && band !== "" && band !== "2.4"
 
   // The headline names the state of the thing the switch controls: Omdrop is
   // on or it is off. "Not receiving" described a symptom, and read as a
@@ -197,7 +185,6 @@ Panel {
   // can see us is a fault, not a nuance, and must not read as "on".
   readonly property string stateText: {
     if (!usable) return "Not available"
-    if (switchingBand) return "Switching to 2.4 GHz" + busyDots
     if (busy) return (turningOn ? "Turning on" : "Turning off") + busyDots
     if (settling) return "Waking the radio" + busyDots
     if (!receiving) return "Omdrop off"
@@ -215,7 +202,6 @@ Panel {
   readonly property string detailText: {
     if (!usable) return doctorText !== "" ? doctorText
                                           : "Needs the AWDL radio support this plugin's README describes."
-    if (switchingBand) return "AirDrop needs 2.4 GHz. Your Wi-Fi drops for a few seconds, and comes back when you turn Omdrop off."
     if (settling) return "The radio takes up to a minute to come up."
     if (lastError !== "") return lastError
     if (reasonText !== "") return reasonText
@@ -347,8 +333,6 @@ Panel {
       deviceName = s.name || ""
       downloadDir = s.dir || ""
       blockedReason = s.reason || ""
-      band = s.band || ""
-      bandHeld = !!s.band_held
       syncWindowToRunning(s.mode || "off")
       if (!nameField.activeFocus) nameField.text = deviceName
       if (!dirField.activeFocus) dirField.text = tildify(downloadDir)

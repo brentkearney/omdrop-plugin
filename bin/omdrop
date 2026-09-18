@@ -180,144 +180,6 @@ span_seconds() {
     | awk -F': *' '$2 ~ /^[0-9]+$/ { printf "%d", $2 / 1000000; exit }'
 }
 
-# ---------------------------------------------------------------- Wi-Fi band
-#
-# AWDL and the infra link share one radio. AWDL works on channel 6, in the
-# 2.4 GHz band; with the station associated on 5 GHz the radio cannot serve
-# both, and discovery fails. So a receive window drops the link to 2.4 GHz
-# first and puts it back afterwards.
-#
-# The band we have to restore is written to a FILE, not held in memory: `on`
-# and `off` are separate invocations, and the window usually ends in a systemd
-# timer rather than in the process that opened it. It lives under the config
-# directory rather than /run so a reboot cannot strand the user on 2.4 -- an
-# nmcli band pin survives a reboot, so the note that undoes it must too.
-BANDRESTORE="${XDG_CONFIG_HOME:-$HOME/.config}/omdrop/band-restore"
-
-# Networks this machine has seen a 2.4 GHz BSS on, one connection UUID per
-# line. A scan that misses a band and a network that has no such band are
-# indistinguishable in one sample, and we were reporting the second whenever we
-# saw the first: "no 2.4 GHz band found for this network" about the very
-# network the user had been receiving on all day. One remembered sighting is
-# enough to know which of the two it is.
-BANDSEEN="${XDG_CONFIG_HOME:-$HOME/.config}/omdrop/networks-with-24"
-
-# The active Wi-Fi profile's UUID. Used as the key because it survives an SSID
-# with a ':' or a '\' in it, which nmcli's -t output would need unescaping for.
-wifi_uuid() {
-  nmcli -t -f UUID,TYPE connection show --active 2>/dev/null |
-    awk -F: '$2 == "802-11-wireless" { print $1; exit }'
-}
-
-band24_remember() {
-  local uuid=$1
-  [[ -n "$uuid" ]] || return 0
-  band24_known "$uuid" && return 0
-  mkdir -p "$(dirname "$BANDSEEN")"
-  printf '%s\n' "$uuid" >> "$BANDSEEN"
-}
-
-band24_known() {
-  [[ -n "$1" && -r "$BANDSEEN" ]] && grep -qxF "$1" "$BANDSEEN"
-}
-
-band_field() {
-  command -v omarchy-network-band >/dev/null 2>&1 || return 1
-  omarchy-network-band 2>/dev/null | awk -v k="$1" '$1 == k { print $2; exit }'
-}
-
-# Drop to 2.4 GHz for the window, remembering what to put back. Returns
-# non-zero only when we needed to move and could not.
-band_drop_to_24() {
-  command -v omarchy-network-band >/dev/null 2>&1 || return 0
-  local cur sel avail uuid
-  local i try
-  cur=$(band_field band); sel=$(band_field selected); avail=$(band_field available)
-  [[ -n "$cur" ]] || return 0                       # no wi-fi to reason about
-  uuid=$(wifi_uuid)
-  [[ ",$avail," == *2.4* ]] && band24_remember "$uuid"
-  [[ "$cur" != 2.4 ]] || { band24_remember "$uuid"; return 0; }   # already there
-
-  # omarchy-network-band reads NetworkManager's cached scan (--rescan no, so
-  # that polling it stays cheap). A cache that has not seen the AP's 2.4 GHz
-  # BSS lately is indistinguishable from a network that has none -- and a
-  # 5 GHz association is exactly the situation where the 2.4 entry goes stale.
-  # This runs once, when a window opens, so it can afford to ask for the truth.
-  #
-  # `device wifi rescan` is the wrong tool for that: it only *requests* a scan,
-  # returns in milliseconds, and NetworkManager refuses it outright when
-  # another scan ran recently -- so polling afterwards just re-reads an
-  # unchanged cache. `list --rescan yes` blocks until the results are in
-  # (~3.5 s here) and waits for a scan already in flight instead of failing.
-  #
-  # Twice, because one scan is one sample: a single sweep that lands while the
-  # radio is elsewhere drops a band that is plainly there, and the price of
-  # believing it is a feature that refuses to start.
-  for try in 1 2; do
-    [[ ",$avail," == *2.4* ]] && break
-    timeout 25 nmcli device wifi list --rescan yes >/dev/null 2>&1 || true
-    for i in $(seq 1 5); do
-      avail=$(band_field available)
-      [[ ",$avail," == *2.4* ]] && break
-      sleep 1
-    done
-  done
-
-  if [[ ",$avail," == *2.4* ]]; then
-    band24_remember "$uuid"
-  else
-    # Three different situations, and they used to share one sentence that
-    # asserted the strongest of them. Only claim the network has no 2.4 GHz
-    # when we have never seen it on 2.4; otherwise say the scan missed it,
-    # which is both true and worth retrying.
-    if band24_known "$uuid"; then
-      echo "this network's 2.4 GHz band did not answer a scan just now, and AirDrop needs it. It has been there before, so this is worth trying again in a moment." >&2
-    elif [[ -z "$avail" ]]; then
-      echo "no Wi-Fi networks answered a scan just now, so AirDrop cannot tell whether this one has the 2.4 GHz band it needs. Try again in a moment." >&2
-    else
-      echo "this network appears to have no 2.4 GHz band, and AirDrop needs one to reach Apple devices (the scan found: $avail)." >&2
-    fi
-    return 1
-  fi
-
-  # A profile pinned to a band the radio is not actually on is broken state,
-  # and it defeats the move below: omarchy-network-band sees previous ==
-  # desired, exits 0 without reassociating, and we wait 30 s for something
-  # that never started. Clear the pin so the move is a real change. What gets
-  # remembered is "auto", not the pin -- putting back a pin the link never
-  # honoured is not a restoration.
-  if [[ "$sel" == 2.4 ]]; then
-    echo "omdrop: profile is pinned to 2.4 GHz but the link is on $cur; clearing the pin" >&2
-    omarchy-network-band auto >/dev/null 2>&1 || true
-    sel=auto
-  fi
-
-  mkdir -p "$(dirname "$BANDRESTORE")"
-  printf '%s
-' "${sel:-auto}" > "$BANDRESTORE"
-  echo "omdrop: moving Wi-Fi to 2.4 GHz for this window (was ${sel:-auto})" >&2
-  omarchy-network-band 2.4 >/dev/null 2>&1 || { rm -f "$BANDRESTORE"; return 1; }
-
-  # Reassociation is not instant. Wait for the link rather than starting the
-  # radio on a band we have not landed on yet.
-  for i in $(seq 1 30); do
-    [[ "$(band_field band)" == 2.4 ]] && return 0
-    sleep 1
-  done
-  echo "omdrop: still not on 2.4 GHz after 30s" >&2
-  return 1
-}
-
-# Put the band back exactly as we found it. Safe to call when we never moved.
-band_restore() {
-  [[ -r "$BANDRESTORE" ]] || return 0
-  local want; want=$(head -1 "$BANDRESTORE" | tr -d '[:space:]')
-  rm -f "$BANDRESTORE"
-  [[ -n "$want" ]] || return 0
-  command -v omarchy-network-band >/dev/null 2>&1 || return 0
-  echo "omdrop: restoring Wi-Fi band to $want" >&2
-  omarchy-network-band "$want" >/dev/null 2>&1 || true
-}
 
 setting_get() {
   [[ -r "$SETTINGS" ]] || return 0
@@ -689,13 +551,6 @@ cmd_on() {
 
   cancel_window
 
-  # Band before either: AWDL works on channel 6, and the station and AWDL share
-  # one radio, so a link associated on 5 GHz cannot serve both. Moving after
-  # the window is up would strand it on the wrong band.
-  if ! band_drop_to_24; then
-    die "Wi-Fi could not be moved to the 2.4 GHz band, which AirDrop needs.
-Nothing was started; your connection is unchanged."
-  fi
 
   # Receiver FIRST when it can start, radio second. Run 20260912T222217Z is the
   # argument for the order: the window advertised 16 s before the receiver was
@@ -737,27 +592,21 @@ Nothing was started; your connection is unchanged."
     systemctl --user start "$UNIT"
   }
 
-  # Every bail-out from here on has to undo the band move, or the user is left
-  # pinned to 2.4 GHz by a window that never opened.
   if (( receiver_first )); then
     if ! start_receiver; then
-      band_restore
       die "The AirDrop receiver would not start."
     fi
     if ! radio_up; then
       systemctl --user stop "$UNIT" >/dev/null 2>&1
       [[ -x "$DISCOVERABLE" ]] && pkexec "$DISCOVERABLE" stop >/dev/null 2>&1
-      band_restore
       die "${RADIO_ERR:-The AirDrop radio could not be started.}"
     fi
   else
     if ! radio_up; then
-      band_restore
       die "${RADIO_ERR:-The AirDrop radio could not be started.}"
     fi
     if ! start_receiver; then
       [[ -x "$DISCOVERABLE" ]] && pkexec "$DISCOVERABLE" stop >/dev/null 2>&1
-      band_restore
       die "The AirDrop receiver would not start."
     fi
   fi
@@ -784,19 +633,6 @@ cmd_off() {
   # Stop advertising even if the receiver was already down: the two can drift
   # apart when something else stopped one of them.
   [[ -x "$DISCOVERABLE" ]] && pkexec "$DISCOVERABLE" stop >/dev/null 2>&1
-  # Last, and unconditionally. The note is only written when we actually moved,
-  # so this is a no-op otherwise -- and it has to run even when the stops above
-  # failed, or the user stays pinned to 2.4 GHz.
-  band_restore
-  # band_restore reassociates, and avahi re-announces once the link is back --
-  # which is exactly when it can rename itself over an echo of its own record
-  # and leave this host unreachable by name. The helper's stop already put back
-  # a name that had drifted by then; this covers the drift that happens after
-  # it exited. Detached and bounded: `off` must not wait on the radio settling.
-  if [[ -x "$DISCOVERABLE" ]]; then
-    setsid pkexec "$DISCOVERABLE" mdns-reclaim 40 >/dev/null 2>&1 &
-    disown
-  fi
   cmd_status
 }
 
@@ -832,9 +668,7 @@ cmd_status() {
 
   if (( json )); then
     ON="$on" LEFT="$left" VIS="$vis" MODE="$mode" DIR="$(effective_dir)" \
-    REASON="$reason" \
-    RXPROVEN="$rxproven" BAND="$(band_field band)" BANDHELD="$([[ -r "$BANDRESTORE" ]] && echo 1 || echo 0)" \
-    NAME="$(effective_name)" python3 -c '
+    REASON="$reason" RXPROVEN="$rxproven" NAME="$(effective_name)" python3 -c '
 import json, os
 left, vis = os.environ["LEFT"], os.environ["VIS"]
 print(json.dumps({
@@ -847,9 +681,6 @@ print(json.dumps({
     "dir": os.environ["DIR"],
     "mode": os.environ["MODE"],
     "reason": os.environ["REASON"] or None,
-    "band": os.environ["BAND"] or None,
-    # True when omdrop moved the band and still owes the user a restore.
-    "band_held": os.environ["BANDHELD"] == "1",
     "rx_proven": os.environ["RXPROVEN"] == "1",
 }))'
     return

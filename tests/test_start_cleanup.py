@@ -18,7 +18,7 @@ class FailedRadioStartCleanupTests(unittest.TestCase):
             helper.write_text("#!/bin/sh\n")
             helper.chmod(0o755)
             capture = Path(directory) / "events"
-            harness = f'''\nset -uo pipefail\nreceiver_first=1\nRADIO_ERR="supervisor did not start"\nUNIT=airdrop-receiver.service\nDISCOVERABLE={helper}\nCAPTURE={capture}\nstart_receiver(){{ return 0; }}\nradio_up(){{ return 1; }}\nsystemctl(){{ :; }}\npkexec(){{ printf 'pkexec %s\\n' "$*" >> "$CAPTURE"; }}\nband_restore(){{ printf 'band_restore\\n' >> "$CAPTURE"; }}\ndie(){{ printf 'die %s\\n' "$*" >> "$CAPTURE"; exit 9; }}\n{fragment}\n'''
+            harness = f'''\nset -uo pipefail\nreceiver_first=1\nRADIO_ERR="supervisor did not start"\nUNIT=airdrop-receiver.service\nDISCOVERABLE={helper}\nCAPTURE={capture}\nstart_receiver(){{ return 0; }}\nradio_up(){{ return 1; }}\nsystemctl(){{ :; }}\npkexec(){{ printf 'pkexec %s\\n' "$*" >> "$CAPTURE"; }}\ndie(){{ printf 'die %s\\n' "$*" >> "$CAPTURE"; exit 9; }}\n{fragment}\n'''
             result = subprocess.run(
                 ["bash", "-c", harness], capture_output=True, text=True
             )
@@ -26,7 +26,7 @@ class FailedRadioStartCleanupTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 9, result.stdout + result.stderr)
         self.assertIn(f"pkexec {helper} stop", events)
-        self.assertLess(events.index("pkexec"), events.index("band_restore"))
+        self.assertLess(events.index("pkexec"), events.index("die"))
 
 
 if __name__ == "__main__":
