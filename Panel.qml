@@ -157,6 +157,10 @@ Panel {
   // Only on a change of mode, so a running window never fights a user who is
   // dragging the slider to pick the next one. Going off leaves the last
   // position alone: it is what they chose, and most likely what they want next.
+  //
+  // A mode the user just asked for is not news: rescheduleWindow() records it
+  // here so the poll that follows a reschedule does not read its own result as
+  // a change and move the slider under the hand that just set it.
   property string windowMode: ""
   function syncWindowToRunning(mode) {
     if (mode === windowMode) return
@@ -238,6 +242,39 @@ Panel {
     busy = true
     lastError = ""
     toggleProc.running = true
+  }
+
+  // Moving the slider during a live window resets that window to the new
+  // selection, counting from now: choosing 10 minutes leaves ten minutes,
+  // whatever was left before. Without this the row only described the NEXT
+  // press, so a user extending a window that was about to close had no way to
+  // do it but turn Omdrop off and on again.
+  //
+  // On release rather than on every drag position: each call re-arms the
+  // window timer and rewrites the radio's deadline, and a drag across the
+  // slider would otherwise fire one of those per stop it passes over.
+  function rescheduleWindow() {
+    if (!receiving || busy || !usable) return
+    windowMode = windowArg === "once" || windowArg === "forever" ? windowArg : "timed"
+    lastError = ""
+    rescheduleProc.command = [root.cli, "on", root.windowArg]
+    rescheduleProc.running = true
+  }
+
+  // Deliberately not `busy`: the switch is not moving and the radio is already
+  // up, so this is a quiet adjustment rather than a transition to narrate. A
+  // refusal still has to surface, and the poll afterwards is what redraws the
+  // countdown against the new deadline.
+  Process {
+    id: rescheduleProc
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.lastError = text.trim()
+    }
+    onExited: function(code) {
+      if (code === 0) root.lastError = ""
+      statusProc.running = true
+    }
   }
 
   Process {
@@ -565,7 +602,7 @@ Panel {
             tickCount: root.windowStops.length
             value: root.windowIndex
             onMoved: function(v) { root.windowIndex = Math.round(v) }
-            onReleased: function(v) { root.windowIndex = Math.round(v) }
+            onReleased: function(v) { root.windowIndex = Math.round(v); root.rescheduleWindow() }
           }
         }
 
