@@ -47,7 +47,7 @@ PROJ="$(cd "$(dirname "$SELF")/.." && pwd)"
 # to drift. $0 rather than $SELF: the plugin's bin/omdrop is a symlink to a
 # source checkout during development, and resolving it lands next to the
 # script instead of next to the manifest that shipped it.
-VERSION_FALLBACK=0.1.0
+VERSION_FALLBACK=0.2.0
 omdrop_version() {
   local dir manifest version=
   dir=$(cd "$(dirname "$0")/.." 2>/dev/null && pwd) || dir=
@@ -447,7 +447,16 @@ DRIVER_PKG=brcmfmac-awdl-dkms
 # checkout below is detached at this SHA and the build only runs if it
 # succeeded. Bump it, in the same commit, whenever the plugin needs a newer
 # driver: the full 40 characters, because a short SHA is not a pin.
-DRIVER_COMMIT=0a7303da01757f7bdfa91be13b2b69b2c4d3b7fd
+DRIVER_COMMIT=0ad1921cfd44c2a88e561db16cff1017fa6c5b78
+
+# The AirDrop support library, pinned the same way and for a stronger reason:
+# the receiver imports opendrop and executes it, so its code is part of this
+# plugin's runtime. `yay -S opendrop` names a package, not a revision, and the
+# AUR can hold different code tomorrow -- the marketplace refused the listing
+# over exactly that (issue 7021). This commit's recipe names the v0.13.0
+# tarball and the sha256 makepkg verifies, so the whole chain is fixed.
+OPENDROP_AUR=https://aur.archlinux.org/opendrop.git
+OPENDROP_COMMIT=cf6d192a1458c491c0543b8289b7698bcb1b2d47
 cmd_install_driver() {
   local self_q
   printf -v self_q '%q' "$0"
@@ -470,19 +479,26 @@ cmd_install_driver() {
   # name it as an optional dependency -- it belongs to the receiver, not the
   # kernel module, and pacman does not install optdepends. So a user who
   # installed the driver and nothing else got a working radio and a receiver
-  # that could not start. It is an AUR package; Omarchy ships a helper for
-  # those, and without one there is nothing to do but say the name.
+  # that could not start. Build it here, from the pinned recipe above.
+  #
+  # --nocheck because the recipe's check() wants python-pytest-runner, a
+  # checkdepend that adds nothing to a user's install. --assume-installed
+  # owlink because opendrop declares owl, the userspace AWDL daemon its own
+  # sender needs: we drive AWDL in firmware and never run owl, and the only
+  # package providing it is a -git recipe that is unpinnable by construction.
+  # Pulling that in would reintroduce the mutable dependency this pin removes.
+  local osrc="${XDG_CACHE_HOME:-$HOME/.cache}/omdrop/opendrop-aur"
   if ! opendrop_installed; then
-    if command -v yay >/dev/null 2>&1; then
-      build="$build
-yay -S --needed --noconfirm opendrop"
-    elif command -v paru >/dev/null 2>&1; then
-      build="$build
-paru -S --needed --noconfirm opendrop"
-    else
-      build="$build
-echo 'This also needs the AUR package: opendrop. Install it with your AUR helper, then run: omdrop setup'"
-    fi
+    build="$build
+mkdir -p \"\$(dirname '$osrc')\"
+if [ -d '$osrc/.git' ]; then
+  git -C '$osrc' fetch --quiet origin
+else
+  git clone --quiet $OPENDROP_AUR '$osrc'
+fi
+echo 'Building the AirDrop support library, AUR commit $OPENDROP_COMMIT'
+git -C '$osrc' checkout --detach cf6d192a1458c491c0543b8289b7698bcb1b2d47 && makepkg --dir '$osrc' -f --nocheck
+sudo pacman -U --noconfirm --assume-installed owlink '$osrc'/opendrop-*.pkg.tar.*"
   fi
 
   # A repository that already carries the driver makes building it pointless:
@@ -508,7 +524,7 @@ else
   git clone --quiet $DRIVER_REPO '$src'
 fi
 echo 'Building driver commit $DRIVER_COMMIT'
-git -C '$src' checkout --detach 0a7303da01757f7bdfa91be13b2b69b2c4d3b7fd && makepkg --dir '$src' -si"
+git -C '$src' checkout --detach 0ad1921cfd44c2a88e561db16cff1017fa6c5b78 && makepkg --dir '$src' -si"
     fi
   fi
 
