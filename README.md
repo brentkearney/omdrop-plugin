@@ -40,15 +40,22 @@ omarchy plugin enable netmojo.omdrop
 
 The widget lands on the right of the bar. Move it with `omarchy bar move netmojo.omdrop --section center`.
 
+Installing the plugin only clones its files; it does not run anything as root. On first use, the panel opens a terminal for the driver and receiver dependencies. If UFW is active, that same terminal also adds one receiver rule: TCP 8771 on `awdl0`, from an IPv6 link-local address to an IPv6 link-local address. Omdrop does not enable UFW, change its defaults, or expose the receiver on infrastructure Wi-Fi.
+
+If you installed the driver before this firewall setup was available, run `omdrop firewall install` once. The command is idempotent.
+
 `omdrop --version` reports what you are running; include it in any bug report.
 
 ## Remove
 
+If UFW was active when you set up Omdrop, remove its receiver rule before removing the plugin:
+
 ```bash
+omdrop firewall remove
 omarchy plugin remove netmojo.omdrop
 ```
 
-That leaves the driver package alone. Remove the patched wifi driver separately with `pacman -R brcmfmac-awdl-dkms`.
+That leaves the driver package alone. Remove the patched Wi-Fi driver separately with `pacman -R brcmfmac-awdl-dkms`.
 
 ## Use
 
@@ -79,6 +86,8 @@ The radio helper runs as root through `pkexec`, because configuring AWDL means v
 Privilege is granted by a named polkit action, `org.omarchy.omdrop.discover`, bound to one helper at `/usr/lib/omdrop/omdrop-discoverable`. That path is root-owned and not writable by the user whose session invokes it, which is the point: a rule that whitelists a script inside someone's home directory hands root to anything running as that user. Turning discoverability on from your own seat needs no password; a remote or inactive session must authenticate as an administrator.
 
 The `brcmfmac-awdl-dkms` package installs both the helper and that action, so there is no manual privilege step and nothing here asks you to grant root to a script in your home directory.
+
+The UFW exception belongs to the receiver, not the driver package. Omdrop runs `sudo ufw` with fixed arguments in the visible dependency-install terminal, after the package work. `sudo` normally reuses the authentication from installing the driver, so this does not cause a second password prompt. The rule is safe to apply repeatedly; UFW skips an identical existing rule.
 
 ## Problems and Contributions
 If you encounter a bug, or have a feature request, [create an Issue](https://github.com/brentkearney/omdrop-plugin/issues) here. Or better yet, have your agent fix or implement it, and [create a Pull Request](https://github.com/brentkearney/omdrop-plugin/pulls). I'm happy to review and merge.
