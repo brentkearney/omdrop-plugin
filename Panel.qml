@@ -163,6 +163,8 @@ Panel {
   // a change and move the slider under the hand that just set it.
   property string windowMode: ""
   function syncWindowToRunning(mode) {
+    // A hand on the slider outranks anything a poll has to say.
+    if (windowPicking) return
     if (mode === windowMode) return
     windowMode = mode
     var i
@@ -219,7 +221,12 @@ Panel {
   // window runs, the chosen duration is replaced by what is left of it. Only
   // for timed windows -- "one file" and "until I turn it off" have nothing to
   // count down, so they keep their label.
-  readonly property bool countingDown: receiving && remaining > 0
+  //
+  // While a hand is on the slider the label comes back, whatever is running:
+  // a countdown answers a question nobody is asking mid-drag, and without the
+  // label there is no way to see which stop you have landed on.
+  property bool windowPicking: false
+  readonly property bool countingDown: receiving && remaining > 0 && !windowPicking
   readonly property string windowValueText: {
     if (!countingDown) return windowStops[windowIndex].label
     var m = Math.floor(remaining / 60), sec = remaining % 60
@@ -601,8 +608,12 @@ Panel {
             integer: true
             tickCount: root.windowStops.length
             value: root.windowIndex
-            onMoved: function(v) { root.windowIndex = Math.round(v) }
-            onReleased: function(v) { root.windowIndex = Math.round(v); root.rescheduleWindow() }
+            onMoved: function(v) { root.windowPicking = true; root.windowIndex = Math.round(v) }
+            onReleased: function(v) {
+              root.windowIndex = Math.round(v)
+              root.windowPicking = false
+              root.rescheduleWindow()
+            }
           }
         }
 
