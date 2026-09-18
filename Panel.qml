@@ -185,7 +185,7 @@ Panel {
   // typically and occasionally 30-50s when the 2.4 scan is cold. Saying
   // "Making you visible" through that is not wrong, but it tells the user
   // nothing about why their Wi-Fi just went away.
-  readonly property bool switchingBand: busy && bandHeld && band !== "" && band !== "2.4"
+  readonly property bool switchingBand: busy && turningOn && bandHeld && band !== "" && band !== "2.4"
 
   // The headline names the state of the thing the switch controls: Omdrop is
   // on or it is off. "Not receiving" described a symptom, and read as a
