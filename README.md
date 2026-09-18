@@ -40,26 +40,24 @@ omarchy plugin enable netmojo.omdrop
 
 The widget lands on the right of the bar. Move it with `omarchy bar move netmojo.omdrop --section center`.
 
-Installing the plugin only clones its files; it does not run anything as root. On first use, the panel opens a terminal for the driver and receiver dependencies. If UFW is active, that same terminal also adds one receiver rule: TCP 8771 on `awdl0`, from an IPv6 link-local address to an IPv6 link-local address. Omdrop does not enable UFW, change its defaults, or expose the receiver on infrastructure Wi-Fi.
+On first use of the plugin, the panel opens a terminal to prompt for a password to install the [patched wifi driver](https://github.com/brentkearney/omdrop-awdl) and update your firewall rule to allow connections on the new virtual interface (TCP 8771 on `awdl0`, to/from an IPv6 link-local address). 
 
-If you installed the driver before this firewall setup was available, run `omdrop firewall install` once. The command is idempotent.
-
-`omdrop --version` reports what you are running; include it in any bug report.
+`omdrop --version` reports what version you are running; include it in any bug report.
 
 ## Remove
-
-If UFW was active when you set up Omdrop, remove its receiver rule before removing the plugin:
 
 ```bash
 omdrop firewall remove
 omarchy plugin remove netmojo.omdrop
 ```
-
-That leaves the driver package alone. Remove the patched Wi-Fi driver separately with `pacman -R brcmfmac-awdl-dkms`.
+Remove the patched Wi-Fi driver separately with:
+```
+pacman -R brcmfmac-awdl-dkms
+```
 
 ## Use
 
-Click the parachute to open the panel. Inside:
+Click the parachute icon to open the panel. Inside:
 
 - **The switch** turns receiving on and off. Right-clicking the bar icon does the same without opening the panel.
 - **Stay visible for** sets how long receiving mode lasts, from one file to always on.
