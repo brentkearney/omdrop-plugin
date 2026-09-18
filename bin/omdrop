@@ -83,11 +83,12 @@ fi
 # is bounded unless you say otherwise. Ten minutes is what iOS uses.
 DEFAULT_WINDOW=10m
 
-# The one-shot watcher: a transient .path unit on the download folder that
-# turns us off as soon as a file lands. PathModified fires on any change to
-# that directory, so an unrelated download can also close the window early --
-# which is the safe direction to be wrong in.
-ONCE=omdrop-once
+# The watcher announces every file that lands and, in one-file mode, turns us
+# off after the first. There is no separate unit for that mode: `omdrop-once`
+# named a .path unit nothing ever created, so `status` -- which inferred the
+# mode from it -- called every one-file window "forever", and the panel's
+# duration row showed "Until I turn it off" for a window that stops after one
+# file. The watcher's own ExecStart carries the truth.
 WATCH=omdrop-watch
 
 # omdrop's own settings live apart from the receiver's config.toml on purpose:
@@ -137,6 +138,16 @@ receiving() {
   [[ "$(systemctl --user is-active "$UNIT" 2>/dev/null)" == active ]]
 }
 
+
+# One-file mode lives in the watcher's arguments, nowhere else: `cmd_on` starts
+# it with --once and it turns us off after the first arrival. Reading it back
+# off the unit keeps `status` honest without a second piece of state to drift.
+watch_is_once() {
+  local exec
+  exec=$(systemctl --user show "$WATCH.service" -p ExecStart --value 2>/dev/null) || return 1
+  [[ "$exec" == *"watch --once"* ]]
+}
+
 # Seconds until the pending window closes, or nothing at all when no window is
 # armed.
 #
@@ -170,7 +181,6 @@ window_remaining() {
 
 cancel_window() {
   systemctl --user stop "$WINDOW.timer" >/dev/null 2>&1 || true
-  systemctl --user stop "$ONCE.path" >/dev/null 2>&1 || true
   systemctl --user stop "$WATCH.service" >/dev/null 2>&1 || true
 }
 
@@ -447,7 +457,7 @@ DRIVER_PKG=brcmfmac-awdl-dkms
 # checkout below is detached at this SHA and the build only runs if it
 # succeeded. Bump it, in the same commit, whenever the plugin needs a newer
 # driver: the full 40 characters, because a short SHA is not a pin.
-DRIVER_COMMIT=0ad1921cfd44c2a88e561db16cff1017fa6c5b78
+DRIVER_COMMIT=2551d5d9485f0e26ed91d2f8bd5c94b12402b6a0
 
 # The AirDrop support library, pinned the same way and for a stronger reason:
 # the receiver imports opendrop and executes it, so its code is part of this
@@ -524,7 +534,7 @@ else
   git clone --quiet $DRIVER_REPO '$src'
 fi
 echo 'Building driver commit $DRIVER_COMMIT'
-git -C '$src' checkout --detach 0ad1921cfd44c2a88e561db16cff1017fa6c5b78 && makepkg --dir '$src' -si"
+git -C '$src' checkout --detach 2551d5d9485f0e26ed91d2f8bd5c94b12402b6a0 && makepkg --dir '$src' -si"
     fi
   fi
 
@@ -664,7 +674,7 @@ cmd_status() {
   receiving && on=true
   if [[ "$on" == true ]]; then
     mode=forever
-    systemctl --user is-active "$ONCE.path"   >/dev/null 2>&1 && mode=once
+    watch_is_once && mode=once
     systemctl --user is-active "$WINDOW.timer" >/dev/null 2>&1 && mode=timed
   fi
   left=$(window_remaining) || left=
@@ -706,7 +716,11 @@ print(json.dumps({
     printf 'Not receiving\n'
     return
   fi
+  # Same three windows the panel names, in the same words: a one-file window
+  # has no clock to report, and calling it "until you turn it off" described
+  # the wrong end condition.
   local window="until you turn it off"
+  [[ "$mode" == once ]] && window="until one file arrives"
   [[ -n "$left" ]] && window=$(printf '%d:%02d left' $((left / 60)) $((left % 60)))
   case "$vis" in
     true)    printf 'Visible to everyone as "%s" -- %s\n' "$(effective_name)" "$window" ;;
@@ -753,7 +767,15 @@ cmd_watch() {
       "$SELF" handle "$f" &
     done
     if (( once )) && (( ${#files[@]} )); then
-      "$SELF" off >/dev/null 2>&1
+      # In its OWN transient unit, not in this process. `off` calls
+      # cancel_window, which stops omdrop-watch.service -- this service -- and
+      # systemd kills the whole cgroup, so an in-process `off` was killed
+      # partway through and the receiver stayed up. Observed twice on
+      # 2026-09-17: a one-file window announced its file, closed the watcher,
+      # and left the receiver listening, which then accepted a second file.
+      # --collect so the unit does not linger once it has exited.
+      systemd-run --user --quiet --collect "$SELF" off >/dev/null 2>&1 \
+        || "$SELF" off >/dev/null 2>&1
       return 0
     fi
   done
