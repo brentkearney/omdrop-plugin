@@ -43,18 +43,35 @@ SELF="$(readlink -f "$0")"
 PROJ="$(cd "$(dirname "$SELF")/.." && pwd)"
 
 # The version a bug report needs. manifest.json is the single source of truth
-# -- the marketplace reads it, so a constant here would be a second one, free
-# to drift. $0 rather than $SELF: the plugin's bin/omdrop is a symlink to a
-# source checkout during development, and resolving it lands next to the
-# script instead of next to the manifest that shipped it.
+# -- the marketplace reads it -- and the constant below is only a last resort.
+#
+# Resolve $0 before looking for the manifest. Invoked through the
+# ~/.local/bin/omdrop symlink that `setup` creates, an unresolved $0 puts the
+# search in ~/.local, which holds no manifest, so the constant was printed
+# instead. That is how `omdrop version` reported 0.4.1 while the installed
+# manifest said 0.4.0 and concealed a stale install.
+#
+# A fallback that silently substitutes for the real value is the same class of
+# defect as a status line reporting a state that was never entered, so this one
+# says when it is guessing, and says when the two disagree.
 VERSION_FALLBACK=0.4.1
 omdrop_version() {
-  local dir manifest version=
-  dir=$(cd "$(dirname "$0")/.." 2>/dev/null && pwd) || dir=
+  local dir manifest version= real
+  real=$(readlink -f "$0" 2>/dev/null) || real="$0"
+  dir=$(cd "$(dirname "$real")/.." 2>/dev/null && pwd) || dir=
   manifest="$dir/manifest.json"
   [[ -n "$dir" && -r "$manifest" ]] \
     && version=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest" | head -1)
-  printf '%s\n' "${version:-$VERSION_FALLBACK}"
+  if [[ -z "$version" ]]; then
+    printf '%s\n' "$VERSION_FALLBACK"
+    printf 'omdrop: could not read a version from %s, so %s is this script only and may not be what is installed.\n' \
+      "${manifest:-manifest.json}" "$VERSION_FALLBACK" >&2
+    return
+  fi
+  printf '%s\n' "$version"
+  [[ "$version" == "$VERSION_FALLBACK" ]] || \
+    printf 'omdrop: the installed manifest says %s but this script is from %s. The install is mismatched; reinstall the plugin.\n' \
+      "$version" "$VERSION_FALLBACK" >&2
 }
 
 # The radio half: makes us discoverable to Everyone (AWDL _airdrop
