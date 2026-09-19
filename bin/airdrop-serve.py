@@ -21,6 +21,7 @@ import plistlib
 import pwd
 import re
 import signal
+import ssl
 import stat as stat_mod
 import struct
 import sys
@@ -33,6 +34,9 @@ import libarchive.extract
 from http.server import ThreadingHTTPServer
 
 import opendrop.server as od_server
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import contacts  # noqa: E402  -- sibling module, found via the line above
 from opendrop.config import AirDropConfig
 from opendrop.server import AirDropServer
 
@@ -363,6 +367,8 @@ class Handler(od_server.AirDropServerHandler):
     """
 
     def do_POST(self):
+        if PEERCERT_DIR:
+            _capture_peer_cert(self.connection)
         if (self.headers.get('Transfer-Encoding', '').lower() == 'chunked'
                 and self.path in ('/Discover', '/Ask')):
             body = read_chunked(self.rfile)
@@ -400,6 +406,34 @@ class Handler(od_server.AirDropServerHandler):
                      ','.join(ask.get('TransferType') or {}) or '?', len(files),
                      '; '.join(f"{f.get('FileName')} {f.get('FileType')} {f.get('FileSize')}B"
                                for f in files) or (ask.get('Items') or '-'))
+        # Contacts Only is enforced here rather than at /Discover, for two
+        # reasons measured on 2026-09-18: a sender presents its Apple-issued
+        # client certificate on /Ask and never on /Discover, and /Ask is the
+        # moment a transfer is actually proposed. Refusing here costs the
+        # sender a clear error instead of an unexplained disappearance.
+        mode = contacts.visibility()
+        if mode == 'contacts':
+            peer_cert = None
+            try:
+                peer_cert = self.connection.getpeercert(binary_form=True)
+            except (AttributeError, ValueError):
+                pass
+            outcome, detail = contacts.decide(ask.get('SenderRecordData'), peer_cert)
+            if outcome != contacts.ACCEPT:
+                # No identifier is logged: the record's hashes are reversible
+                # to a phone number by brute force.
+                logging.warning('ask REFUSED (contacts only): %s%s',
+                                contacts.WHY[outcome],
+                                f' [{detail}]' if detail else '')
+                self.send_response(403)
+                self.send_header('Content-Length', '0')
+                self.end_headers()
+                return
+            logging.info('ask accepted: %s', contacts.WHY[outcome])
+            # Remembered per connection: Ask and Upload share one TLS session,
+            # so an Upload that never passed an Ask has nothing vouching for it.
+            self._contacts_ok = True
+
         # A `links` transfer is Ask-only: with SUPPORTS_URL (0x01) advertised,
         # iOS puts the URL straight into Items and sends no /Upload at all, so
         # accepting the Ask IS the transfer. Store it, or the link is lost.
@@ -425,6 +459,14 @@ class Handler(od_server.AirDropServerHandler):
         self.wfile.write(resp)
 
     def handle_upload(self):
+        # An Upload that never passed an Ask has nothing vouching for it, and
+        # the Upload itself carries no validation record to judge.
+        if contacts.visibility() == 'contacts' and not getattr(self, '_contacts_ok', False):
+            logging.warning('upload REFUSED (contacts only): no accepted Ask on this connection')
+            self.send_response(403)
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return
         ctype = self.headers.get('Content-Type', '').split(';')[0].strip().lower()
         if ctype != 'application/x-dvzip':
             return super().handle_upload()
@@ -462,6 +504,43 @@ config = AirDropConfig(host_name=args.host, computer_name=NAME,
                        computer_model=MODEL, server_port=args.port,
                        airdrop_dir=args.keys, service_id=sid,
                        interface=args.iface, debug=True)
+
+# Ask the peer for a client certificate. Required for Contacts Only, because
+# that certificate is what binds a sender's Apple-signed validation record to
+# the live connection; a record on its own is handed to any prober that asks
+# and would otherwise be replayable. opendrop uses CERT_NONE and so never sees
+# one. CERT_OPTIONAL requests it and still accepts a peer that sends none, so
+# Everyone mode keeps working exactly as before.
+#
+# OMDROP_PEERCERT additionally saves what arrives, for research.
+PEERCERT_DIR = os.environ.get('OMDROP_PEERCERT')
+_plain_context = config.get_ssl_context
+
+
+def _requesting_context():
+    ctx = _plain_context()
+    ctx.verify_mode = ssl.CERT_OPTIONAL
+    return ctx
+
+
+config.get_ssl_context = _requesting_context
+
+if PEERCERT_DIR:
+    os.makedirs(PEERCERT_DIR, exist_ok=True)
+
+    def _capture_peer_cert(conn):
+        try:
+            der = conn.getpeercert(binary_form=True)
+        except (AttributeError, ValueError):
+            return
+        path = os.path.join(PEERCERT_DIR,
+                            f'client-{time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())}.der')
+        if der:
+            with open(path, 'wb') as fh:
+                fh.write(der)
+            logging.warning('captured %d-byte client certificate -> %s', len(der), path)
+        else:
+            logging.warning('peer presented NO client certificate')
 
 # opendrop answers a busy port by quietly moving to the next one, which
 # nothing advertises -- a receiver nobody can reach. Waiting is what the user

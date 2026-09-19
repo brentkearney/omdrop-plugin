@@ -112,6 +112,10 @@ omdrop -- receive files from nearby Apple devices
   status [--json]   receiving or not, time left, the name Macs see
   name [NEW]        show the name, or set it (restarts a running receiver)
   dir [PATH]        show the download folder, or set it
+  visibility [MODE]  show, or set to "everyone" (default) or "contacts".
+                     In contacts mode only known senders may send to you.
+  senders [add|remove ID | list]
+                     manage the known-senders list (emails and phone numbers)
   setup             install what receiving needs: the service, the name Macs
                     see, and this computer's certificate. Safe to run again.
   doctor [--json]   what is still missing before this can receive
@@ -964,6 +968,56 @@ systemctl --user status $UNIT"
   printf 'Files will land in %s\n' "$new"
 }
 
+# Contacts Only. The receiver reads these two files directly (see bin/contacts.py):
+# visibility switches the mode, known-senders is the allow-list of identifiers.
+CONTACTS_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/omdrop"
+
+cmd_visibility() {
+  local vis_file="$CONTACTS_DIR/visibility"
+  if (( $# == 0 )); then
+    printf '%s\n' "$([[ $(cat "$vis_file" 2>/dev/null) == contacts ]] && echo contacts || echo everyone)"
+    return
+  fi
+  case "$1" in
+    everyone) rm -f "$vis_file"
+              printf 'Anyone nearby can send to this machine.\n' ;;
+    contacts)
+      local n; n=$(grep -cvE '^\s*(#|$)' "$CONTACTS_DIR/known-senders" 2>/dev/null || echo 0)
+      mkdir -p "$CONTACTS_DIR"; printf 'contacts\n' > "$vis_file"
+      printf 'Only known senders can send to this machine (%s listed).\n' "$n"
+      (( n == 0 )) && printf 'The list is empty, so everything is refused. Add people with: omdrop senders add <email|phone>\n'
+      ;;
+    *) die "usage: omdrop visibility [everyone|contacts]" ;;
+  esac
+  receiving && systemctl --user restart "$UNIT" >/dev/null 2>&1 || true
+}
+
+cmd_senders() {
+  local f="$CONTACTS_DIR/known-senders"
+  local sub=${1:-list}; shift || true
+  case "$sub" in
+    list)
+      [[ -s "$f" ]] && grep -vE '^\s*(#|$)' "$f" || printf '(no known senders yet)\n' ;;
+    add)
+      (( $# )) || die "usage: omdrop senders add <email-or-phone> [...]"
+      mkdir -p "$CONTACTS_DIR"; touch "$f"
+      local id
+      for id in "$@"; do
+        grep -qxF "$id" "$f" 2>/dev/null || printf '%s\n' "$id" >> "$f"
+      done
+      printf 'Added. %s known now.\n' "$(grep -cvE '^\s*(#|$)' "$f")" ;;
+    remove|rm)
+      (( $# )) || die "usage: omdrop senders remove <email-or-phone> [...]"
+      [[ -f "$f" ]] || die "no known-senders list yet"
+      local id tmp; tmp=$(mktemp)
+      cp "$f" "$tmp"
+      for id in "$@"; do grep -vxF "$id" "$tmp" > "$tmp.n" && mv "$tmp.n" "$tmp"; done
+      mv "$tmp" "$f"
+      printf 'Removed. %s known now.\n' "$(grep -cvE '^\s*(#|$)' "$f")" ;;
+    *) die "usage: omdrop senders [list|add <id>|remove <id>]" ;;
+  esac
+}
+
 cmd_name() {
   if (( $# == 0 )); then
     printf '%s\n' "$(effective_name)"
@@ -997,6 +1051,8 @@ case "${1:-status}" in
   status) shift; cmd_status "$@" ;;
   name)   shift; cmd_name "$@" ;;
   dir)    shift; cmd_dir "$@" ;;
+  visibility|vis) shift; cmd_visibility "$@" ;;
+  senders) shift; cmd_senders "$@" ;;
   setup)  shift; cmd_setup "$@" ;;
   doctor) shift; cmd_doctor "$@" ;;
   install-driver) shift; cmd_install_driver ;;
