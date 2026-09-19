@@ -1,8 +1,6 @@
 # Omdrop
 
-Receive files from nearby Apple devices over AirDrop on Apple Silicon devices running [Omarchy Linux](https://omarchy.org). Sending is not working yet.
-
-This plugin is has been [submitted to the Omarchy Plugin Marketplace](https://github.com/omacom/omarchy-plugin-marketplace/issues/7021), pending review.
+Send and receive files from nearby Apple devices over AirDrop on Apple Silicon devices running [Omarchy Linux](https://omarchy.org). 
 
 https://github.com/user-attachments/assets/3e415609-6e25-48b0-b55f-58252c65356b
 
