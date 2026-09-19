@@ -9,9 +9,8 @@
 # airdrop-serve.py, airdrop-receiver.service and ~/.config/airdrop/config.toml
 # are protocol- and service-layer names, not product ones.
 #
-# This command owns the two knobs that do not belong in the network panel: how
-# long the receive window stays open, and the name the sheet draws under our
-# tile.
+# This command owns the receive-window duration and receiver configuration
+# that do not belong in the panel.
 #
 # The panel's parachute button is a toggle and nothing more (design:
 # design/airdrop/). It shells out to `omdrop toggle` and reads
@@ -20,7 +19,8 @@
 # This wraps what already exists rather than inventing state:
 #   receiving on/off   systemctl --user airdrop-receiver.service
 #   the window         a transient systemd timer that stops that unit
-#   name / model       ~/.config/airdrop/config.toml, read by airdrop-serve.py
+#   name / model / directory / limit
+#                    ~/.config/airdrop/config.toml, read by airdrop-serve.py
 # There is no daemon of our own and no state file. `status` asks systemd, so
 # it stays right when the service dies, the timer fires, or someone runs
 # systemctl by hand.
@@ -47,7 +47,7 @@ PROJ="$(cd "$(dirname "$SELF")/.." && pwd)"
 # to drift. $0 rather than $SELF: the plugin's bin/omdrop is a symlink to a
 # source checkout during development, and resolving it lands next to the
 # script instead of next to the manifest that shipped it.
-VERSION_FALLBACK=0.3.0
+VERSION_FALLBACK=0.3.1
 omdrop_version() {
   local dir manifest version=
   dir=$(cd "$(dirname "$0")/.." 2>/dev/null && pwd) || dir=
@@ -112,6 +112,8 @@ omdrop -- receive files from nearby Apple devices
   status [--json]   receiving or not, time left, the name Macs see
   name [NEW]        show the name, or set it (restarts a running receiver)
   dir [PATH]        show the download folder, or set it
+  limit [PERCENT]   show the maximum transfer size, or set it to 1-90% of
+                    currently free space (default 30%)
   visibility [MODE]  show, or set to "everyone" (default) or "contacts".
                      In contacts mode only known senders may send to you.
   senders [add|remove ID | list]
@@ -127,6 +129,7 @@ Examples:
   omdrop on 10m
   omdrop on forever
   omdrop name "Brent's Omarchy"
+  omdrop limit 30
 EOF
 }
 
@@ -222,6 +225,7 @@ tildify() { local p=$1; printf '%s\n' "${p/#$HOME/\~}"; }
 default_name() { hostname -s 2>/dev/null || echo omdrop; }
 effective_name() { local n; n=$(cfg_get name); [[ -n "$n" ]] && printf '%s\n' "$n" || default_name; }
 effective_dir() { local d; d=$(cfg_get download_dir); [[ -n "$d" ]] && printf '%s\n' "$d" || printf '%s\n' "$HOME/Downloads"; }
+effective_limit() { local n; n=$(cfg_get max_receive_percent); printf '%s\n' "${n:-30}"; }
 
 cfg_get() {
   CONFIG="$CONFIG" python3 - "$1" <<'PY'
@@ -250,12 +254,20 @@ except FileNotFoundError:
     cfg = {}
 except tomllib.TOMLDecodeError as e:
     sys.exit(f'{path}: {e}')
-cfg[key] = val
+cfg[key] = int(val) if key == 'max_receive_percent' else val
 fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix='.config.toml.')
 with os.fdopen(fd, 'w') as f:
     for k, v in cfg.items():
-        esc = v.replace('\\', '\\\\').replace('"', '\\"')
-        f.write(f'{k} = "{esc}"\n')
+        if isinstance(v, bool):
+            rendered = 'true' if v else 'false'
+        elif isinstance(v, int):
+            rendered = str(v)
+        elif isinstance(v, str):
+            esc = v.replace('\\', '\\\\').replace('"', '\\"')
+            rendered = f'\"{esc}\"'
+        else:
+            sys.exit(f'{path}: cannot preserve unsupported value for {k}')
+        f.write(f'{k} = {rendered}\n')
 os.chmod(tmp, 0o644)
 os.replace(tmp, path)
 PY
@@ -972,6 +984,28 @@ systemctl --user status $UNIT"
 # visibility switches the mode, known-senders is the allow-list of identifiers.
 CONTACTS_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/omdrop"
 
+cmd_limit() {
+  if (( $# == 0 )); then
+    printf '%s%%\n' "$(effective_limit)"
+    return
+  fi
+  (( $# == 1 )) || die "usage: omdrop limit [PERCENT]"
+  local new=$1 old
+  [[ "$new" =~ ^[0-9]+$ ]] || die "limit: an integer from 1 to 90"
+  new=$((10#$new))
+  (( new >= 1 && new <= 90 )) || die "limit: an integer from 1 to 90"
+  old=$(effective_limit)
+  cfg_set max_receive_percent "$new" || die "could not write $CONFIG"
+  if receiving && ! systemctl --user restart "$UNIT"; then
+    cfg_set max_receive_percent "$old"
+    systemctl --user restart "$UNIT" >/dev/null 2>&1 || true
+    die "the receiver refused ${new}%, so the limit is still ${old}%.
+systemctl --user status $UNIT"
+  fi
+  printf 'A transfer may use up to %s%% of currently free download-disk space.\n' "$new"
+}
+
+
 cmd_visibility() {
   local vis_file="$CONTACTS_DIR/visibility"
   if (( $# == 0 )); then
@@ -1051,6 +1085,7 @@ case "${1:-status}" in
   status) shift; cmd_status "$@" ;;
   name)   shift; cmd_name "$@" ;;
   dir)    shift; cmd_dir "$@" ;;
+  limit)  shift; cmd_limit "$@" ;;
   visibility|vis) shift; cmd_visibility "$@" ;;
   senders) shift; cmd_senders "$@" ;;
   setup)  shift; cmd_setup "$@" ;;

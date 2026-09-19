@@ -25,12 +25,13 @@ import ssl
 import stat as stat_mod
 import struct
 import sys
+import tempfile
+import threading
 import time
 import unicodedata
 import zlib
 
 import libarchive
-import libarchive.extract
 from http.server import ThreadingHTTPServer
 
 import opendrop.server as od_server
@@ -46,14 +47,16 @@ from opendrop.server import AirDropServer
 # "gpj.<U+202E>exe" renders as "exe.jpg" in a file manager. Used for received
 # file names and for the receiver name we advertise.
 UNSAFE_CHAR = re.compile(r'[/\\\x00]|[\u202a-\u202e\u2066-\u2069\u200b-\u200f\ufeff]|[\x01-\x1f\x7f-\x9f]')
-# The config file is the source of truth: ~/.config/airdrop/config.toml with
-# name / model / download_dir, written by `omdrop setup` and `omdrop name`.
+# The config file is the source of truth: ~/.config/airdrop/config.toml,
+# written by `omdrop setup` and the configuration commands in `omdrop`.
 # CLI flags override individual keys, so the file can be absent entirely.
 # Validation lives here, never in whatever writes the file: a GUI is a
 # convenience for writing a value, not what makes it safe. Reload = restart.
 CONFIG_PATH = os.path.join(os.environ.get('XDG_CONFIG_HOME') or os.path.join(pwd.getpwuid(os.getuid()).pw_dir, '.config'),
                            'airdrop', 'config.toml')
-CONFIG_KEYS = ('name', 'model', 'download_dir')
+CONFIG_KEYS = ('name', 'model', 'download_dir', 'max_receive_percent')
+STRING_CONFIG_KEYS = ('name', 'model', 'download_dir')
+DEFAULT_MAX_RECEIVE_PERCENT = 30
 
 
 def awdl_host():
@@ -97,9 +100,11 @@ def load_config(path):
     bad = sorted(set(cfg) - set(CONFIG_KEYS))
     if bad:
         raise SystemExit(f'{path}: unknown key(s) {", ".join(bad)}; known: {", ".join(CONFIG_KEYS)}')
-    for k, v in cfg.items():
-        if not isinstance(v, str) or not v.strip():
+    for k in STRING_CONFIG_KEYS:
+        if k in cfg and (not isinstance(cfg[k], str) or not cfg[k].strip()):
             raise SystemExit(f'{path}: {k} must be a non-empty string')
+    if 'max_receive_percent' in cfg:
+        validate_receive_percent(cfg['max_receive_percent'])
     return cfg
 
 
@@ -119,6 +124,12 @@ def validate_model(model):
     return model
 
 
+def validate_receive_percent(value):
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 90:
+        raise SystemExit('max_receive_percent must be an integer from 1 to 90')
+    return value
+
+
 def validate_download_dir(path):
     """Resolved once; must exist, be a directory, and be owned by this user --
     received files land here as this user, so a directory we do not own is a
@@ -135,7 +146,9 @@ def validate_download_dir(path):
     return dest
 
 
-ap = argparse.ArgumentParser(description=f'AirDrop receiver. Config: {CONFIG_PATH} (name, model, download_dir); flags override.')
+ap = argparse.ArgumentParser(
+    description=f'AirDrop receiver. Config: {CONFIG_PATH} '
+                '(name, model, download_dir, max_receive_percent); flags override.')
 ap.add_argument('--iface', default='awdl0')
 ap.add_argument('--port', type=int, default=8771)
 ap.add_argument('--name', default=None,
@@ -148,6 +161,8 @@ ap.add_argument('--keys', default=os.path.join(pwd.getpwuid(os.getuid()).pw_dir,
                 help='opendrop dir holding keys/certificate.pem and keys/key.pem')
 ap.add_argument('--outdir', default=None,
                 help='where received files go (config: download_dir)')
+ap.add_argument('--max-receive-percent', type=int, default=None,
+                help='maximum transfer size as a percentage of currently free output disk space')
 ap.add_argument('--config', default=CONFIG_PATH, help='config file path')
 ap.add_argument('--announce', action='store_true',
                 help='also register the service over mDNS (zeroconf)')
@@ -159,6 +174,9 @@ MODEL = validate_model(args.model if args.model is not None else _cfg.get('model
 _outdir = args.outdir if args.outdir is not None else _cfg.get('download_dir', os.path.join(pwd.getpwuid(os.getuid()).pw_dir, 'Downloads'))
 # Resolved once; never chdir -- cwd is process-global and the server is threaded.
 DEST = validate_download_dir(_outdir)
+MAX_RECEIVE_PERCENT = validate_receive_percent(
+    args.max_receive_percent if args.max_receive_percent is not None
+    else _cfg.get('max_receive_percent', DEFAULT_MAX_RECEIVE_PERCENT))
 
 logging.basicConfig(level=logging.DEBUG, stream=sys.stdout,
                     format='%(asctime)s %(levelname)s %(name)s: %(message)s')
@@ -223,58 +241,265 @@ class NoZeroconf:
     def unregister_all_services(self): pass
 
 
-def read_chunked(rfile):
-    """Consume one chunked body from rfile, leaving rfile at the next request."""
-    body = bytearray()
+KIB = 1024
+MIB = 1024 * KIB
+GIB = 1024 * MIB
+
+# Metadata, framing, member count, and idle time have fixed ceilings. Transfer
+# bytes use a percentage of free space computed when the upload starts; users
+# configure that percentage with `omdrop limit`.
+READ_IDLE_TIMEOUT_SECONDS = 30
+INITIAL_READ_SECONDS = 60
+MIN_READ_BYTES_PER_SECOND = 64 * KIB
+MAX_METADATA_BYTES = 1 * MIB
+MAX_ARCHIVE_MEMBERS = 512
+MIN_FREE_BYTES = 1 * GIB
+DISK_CHECK_INTERVAL = 16 * MIB
+IO_CHUNK_BYTES = 64 * KIB
+MAX_CHUNK_LINE_BYTES = 128
+MAX_TRAILER_BYTES = 8 * KIB
+MAX_CONCURRENT_UPLOADS = 2
+UPLOAD_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_UPLOADS)
+
+
+class RequestBodyError(ValueError):
+    status = 400
+
+
+class BodyTooLarge(RequestBodyError):
+    status = 413
+
+
+class UploadLimitError(ValueError):
+    pass
+
+
+class ReceiveBudget:
+    """Byte budget for one upload, based on current free output-disk space."""
+
+    def __init__(self, dest, percent):
+        fs = os.statvfs(dest)
+        self.free_bytes = fs.f_bavail * fs.f_frsize
+        percent_bytes = self.free_bytes * percent // 100
+        reservable = max(0, self.free_bytes - MIN_FREE_BYTES)
+        self.byte_limit = min(percent_bytes, reservable)
+        self.percent = percent
+        if self.byte_limit <= 0:
+            raise UploadLimitError(
+                f'not enough free space while preserving {MIN_FREE_BYTES} bytes')
+
+
+
+class ReadDeadline:
+    """Require sustained progress as well as an idle-socket timeout."""
+
+    def __init__(self):
+        self.started = time.monotonic()
+        self.transferred = 0
+
+    def note(self, size):
+        self.transferred += size
+        allowed = INITIAL_READ_SECONDS + (
+            self.transferred / MIN_READ_BYTES_PER_SECOND)
+        if time.monotonic() > self.started + allowed:
+            raise socket.timeout('request body did not meet minimum read rate')
+
+class LimitedWriter:
+    """Count writes, enforce a byte ceiling, and preserve free disk space."""
+
+    def __init__(self, target, limit, label, limit_error=UploadLimitError,
+                 check_disk=False):
+        self.target = target
+        self.limit = limit
+        self.label = label
+        self.limit_error = limit_error
+        self.check_disk = check_disk
+        self.total = 0
+        self._until_disk_check = 0
+
+    @property
+    def remaining(self):
+        return self.limit - self.total
+
+    def write(self, data):
+        if not data:
+            return 0
+        size = len(data)
+        if size > self.remaining:
+            raise self.limit_error(
+                f'{self.label} exceeds {self.limit}-byte limit')
+        if self.check_disk and size >= self._until_disk_check:
+            fs = os.fstatvfs(self.target.fileno())
+            free = fs.f_bavail * fs.f_frsize
+            if free < MIN_FREE_BYTES + DISK_CHECK_INTERVAL:
+                raise UploadLimitError(
+                    f'{self.label} stopped to preserve {MIN_FREE_BYTES} bytes free')
+            self._until_disk_check = DISK_CHECK_INTERVAL
+        written = self.target.write(data)
+        if written != size:
+            raise OSError(f'short write for {self.label}: {written} of {size} bytes')
+        self.total += written
+        self._until_disk_check -= written
+        return written
+
+
+def body_plan(headers, limit):
+    """Validate framing before sending 100 Continue or reading any body."""
+    transfer = headers.get('Transfer-Encoding', '')
+    if transfer:
+        encodings = [part.strip().lower() for part in transfer.split(',')]
+        if encodings != ['chunked']:
+            raise RequestBodyError(f'unsupported Transfer-Encoding: {transfer!r}')
+        return 'chunked', None
+    value = headers.get('Content-Length')
+    if value is None:
+        raise RequestBodyError('request body needs Content-Length or chunked encoding')
+    try:
+        length = int(value)
+    except (TypeError, ValueError):
+        raise RequestBodyError(f'invalid Content-Length: {value!r}') from None
+    if length < 0:
+        raise RequestBodyError(f'invalid Content-Length: {value!r}')
+    if length > limit:
+        raise BodyTooLarge(f'request body exceeds {limit}-byte limit')
+    return 'length', length
+
+
+def _copy_exact(source, writer, size, truncated, deadline):
+    left = size
+    while left:
+        data = source.read(min(left, IO_CHUNK_BYTES))
+        if not data:
+            raise RequestBodyError(truncated)
+        deadline.note(len(data))
+        writer.write(data)
+        left -= len(data)
+
+
+def _read_chunked(rfile, writer, deadline):
     while True:
-        size = int(rfile.readline().split(b';')[0].strip() or b'0', 16)
-        if size == 0:
-            while rfile.readline() not in (b'\r\n', b'\n', b''):
-                pass
-            return bytes(body)
-        body += rfile.read(size)
-        rfile.readline()
-
-
-def dvzip_decode(data):
-    """DVZip (Content-Type application/x-dvzip): a sequence of blocks, each a
-    4-byte big-endian header + payload; the header's low 31 bits are the
-    payload length and the high bit marks a stored (uncompressed) block, which
-    the sender uses for incompressible data (215526Z: a 22 MB video was 20
-    zlib blocks then 151 stored ones). Whole stream may instead be plain gzip.
-    The payload is a CPIO archive (arXiv 2606.26967 sec. 3.4; odc on macOS 15).
-    """
-    if data[:2] == b'\x1f\x8b':
-        return zlib.decompress(data, 31)
-    out = bytearray()
-    pos = 0
-    while pos + 4 <= len(data):
-        hdr = int.from_bytes(data[pos:pos + 4], 'big')
-        n = hdr & 0x7fffffff
-        pos += 4
-        block = data[pos:pos + n]
-        if len(block) != n:
-            raise ValueError(f'truncated block at {pos - 4}: header says {n}, {len(block)} left')
-        pos += n
-        if hdr & 0x80000000:
-            out += block
-            continue
+        line = rfile.readline(MAX_CHUNK_LINE_BYTES + 1)
+        deadline.note(len(line))
+        if not line or len(line) > MAX_CHUNK_LINE_BYTES or not line.endswith(b'\n'):
+            raise RequestBodyError('invalid or overlong chunk-size line')
+        token = line.split(b';', 1)[0].strip()
         try:
-            out += zlib.decompress(block)
-        except zlib.error as e:
-            raise ValueError(f'undecodable block at {pos - n - 4}, len {n}: {e}')
-    return bytes(out)
+            size = int(token, 16)
+        except ValueError:
+            raise RequestBodyError(f'invalid chunk size: {token[:40]!r}') from None
+        if size < 0:
+            raise RequestBodyError('negative chunk size')
+        if size == 0:
+            trailers = 0
+            while True:
+                line = rfile.readline(MAX_CHUNK_LINE_BYTES + 1)
+                deadline.note(len(line))
+                trailers += len(line)
+                if (not line or len(line) > MAX_CHUNK_LINE_BYTES
+                        or trailers > MAX_TRAILER_BYTES):
+                    raise RequestBodyError('invalid or overlong chunk trailers')
+                if line in (b'\r\n', b'\n'):
+                    return
+        if size > writer.remaining:
+            raise BodyTooLarge(
+                f'request body exceeds {writer.limit}-byte limit')
+        _copy_exact(rfile, writer, size, 'truncated chunk data', deadline)
+        ending = rfile.read(2)
+        deadline.note(len(ending))
+        if ending != b'\r\n':
+            raise RequestBodyError('chunk data missing CRLF')
+
+
+def read_request_body(rfile, headers, target, limit, *, check_disk=False,
+                      plan=None, deadline=None):
+    """Stream one framed request body into target under byte and time limits."""
+    mode, length = plan or body_plan(headers, limit)
+    deadline = deadline or ReadDeadline()
+    writer = LimitedWriter(target, limit, 'request body', BodyTooLarge,
+                           check_disk)
+    if mode == 'chunked':
+        _read_chunked(rfile, writer, deadline)
+    else:
+        _copy_exact(rfile, writer, length, 'truncated request body', deadline)
+    return writer.total
+
+
+def read_small_body(rfile, headers, limit=MAX_METADATA_BYTES):
+    body = io.BytesIO()
+    read_request_body(rfile, headers, body, limit)
+    return body.getvalue()
+
+
+def _inflate(decoder, data, writer):
+    while data:
+        output = decoder.decompress(
+            data, min(IO_CHUNK_BYTES, writer.remaining + 1))
+        writer.write(output)
+        if decoder.unconsumed_tail:
+            data = decoder.unconsumed_tail
+        else:
+            return
+
+
+def _decode_compressed_block(source, size, writer, *, wbits=zlib.MAX_WBITS):
+    decoder = zlib.decompressobj(wbits)
+    left = size
+    while left:
+        data = source.read(min(left, IO_CHUNK_BYTES))
+        if not data:
+            raise ValueError(f'truncated compressed block: {left} bytes missing')
+        left -= len(data)
+        _inflate(decoder, data, writer)
+        if decoder.unused_data:
+            raise ValueError('compressed block has trailing data')
+    writer.write(decoder.flush())
+    if not decoder.eof:
+        raise ValueError('truncated compressed block')
+
+
+def decode_dvzip(source, target, byte_limit):
+    """Stream a gzip or block-framed DVZip body into a bounded CPIO stream."""
+    writer = LimitedWriter(target, byte_limit,
+                           'decompressed archive', check_disk=True)
+    source.seek(0)
+    magic = source.read(2)
+    source.seek(0)
+    if magic == b'\x1f\x8b':
+        decoder = zlib.decompressobj(31)
+        while True:
+            data = source.read(IO_CHUNK_BYTES)
+            if not data:
+                break
+            _inflate(decoder, data, writer)
+            if decoder.unused_data:
+                raise ValueError('gzip body has trailing data')
+        writer.write(decoder.flush())
+        if not decoder.eof:
+            raise ValueError('truncated gzip body')
+        return writer.total
+
+    while True:
+        header = source.read(4)
+        if not header:
+            return writer.total
+        if len(header) != 4:
+            raise ValueError(f'truncated DVZip block header: {len(header)} bytes')
+        value = int.from_bytes(header, 'big')
+        size = value & 0x7fffffff
+        if value & 0x80000000:
+            left = size
+            while left:
+                data = source.read(min(left, IO_CHUNK_BYTES))
+                if not data:
+                    raise ValueError(f'truncated stored block: {left} bytes missing')
+                writer.write(data)
+                left -= len(data)
+        else:
+            _decode_compressed_block(source, size, writer)
 
 
 def safe_name(name, fallback):
-    """One filesystem component from sender-controlled text. Keeps Unicode --
-    'café', '日本語', emoji are legitimate names (231000Z: an ASCII whitelist
-    turned 'Ω café — 日本語 test  file 🐔.jpg' into '_caf_test_file_.jpg') --
-    and removes only what can change *where* or *as what* the file appears:
-    path separators, NUL, control/format characters, leading dots (hidden
-    files) and dot-only names. NFC so 'é' is one code point whichever
-    normalisation the sender used (macOS sends NFD). Capped at 255 bytes of
-    UTF-8, the filesystem limit, cut on a character boundary."""
+    """Return one non-hidden filesystem component from sender-controlled text."""
     name = unicodedata.normalize('NFC', name.replace('\\', '/').rsplit('/', 1)[-1])
     name = UNSAFE_CHAR.sub('', name).strip().lstrip('.')
     stem, ext = os.path.splitext(name)
@@ -284,55 +509,92 @@ def safe_name(name, fallback):
 
 
 def open_new(dest, name):
-    """Create dest/name without clobbering: 'photo.jpg', 'photo-1.jpg', ...
-    (shell-friendly, unlike macOS's 'photo (1).jpg'; the scheme is local, the
-    sender never learns the stored name).
-    O_EXCL makes the check and the create one step, so two threads storing the
-    same name cannot both win."""
+    """Create dest/name atomically without clobbering an existing file."""
     stem, ext = os.path.splitext(name)
     for i in range(10000):
         cand = name if i == 0 else f'{stem}-{i}{ext}'
         try:
-            fd = os.open(os.path.join(dest, cand), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            fd = os.open(os.path.join(dest, cand),
+                         os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
         except FileExistsError:
             continue
         return cand, os.fdopen(fd, 'wb')
     raise FileExistsError(name)
 
 
-def store_upload(raw, dest, tid):
-    """Write every regular file in the DVZip's archive into dest by its
-    sanitised basename. Directories, symlinks, devices and any path component
-    other than the basename are ignored: the archive is untrusted input from
-    radio range, and libarchive's extract() would honour '..', absolute paths
-    and symlink targets unless told not to. Returns the names written.
-    The raw body is kept as <tid>.dvzip only if decoding or extraction fails
-    (that is how 215526Z's video was recovered); on success it is not stored."""
+class ExtractionBudget:
+    def __init__(self, byte_limit):
+        self.byte_limit = byte_limit
+        self.members = 0
+        self.output_bytes = 0
+
+    def count_member(self):
+        self.members += 1
+        if self.members > MAX_ARCHIVE_MEMBERS:
+            raise UploadLimitError(
+                f'archive exceeds {MAX_ARCHIVE_MEMBERS}-member limit')
+
+
+class ExtractedFileWriter(LimitedWriter):
+    def __init__(self, target, budget, name):
+        super().__init__(target, budget.byte_limit, f'file {name!r}',
+                         check_disk=True)
+        self.budget = budget
+
+    def write(self, data):
+        if self.budget.output_bytes + len(data) > self.budget.byte_limit:
+            raise UploadLimitError(
+                f'archive output exceeds {self.budget.byte_limit}-byte limit')
+        written = super().write(data)
+        self.budget.output_bytes += written
+        return written
+
+
+def store_upload(raw, dest, tid, receive_budget):
+    """Decode and extract regular files, removing every output on failure."""
+    created = []
     written = []
     try:
-        cpio = dvzip_decode(raw)
-        logging.info('upload %s: decoded to %d bytes, magic %r', tid, len(cpio), cpio[:6])
-        with libarchive.memory_reader(cpio) as archive:
-            for entry in archive:
-                if not entry.isfile:
-                    continue
-                # AppleDouble sidecars ('._name'): metadata, not content. Test the
-                # raw basename -- safe_name strips leading dots (233146Z stored one
-                # as '_Ω café ….jpg').
-                if os.path.basename(entry.pathname).startswith('._'):
-                    continue
-                base = safe_name(entry.pathname, 'file')
-                name, f = open_new(dest, base)
-                with f:
-                    for block in entry.get_blocks():
-                        f.write(block)
-                written.append(name)
+        with tempfile.TemporaryFile(dir=dest) as cpio:
+            decoded = decode_dvzip(raw, cpio, receive_budget.byte_limit)
+            # The wire copy is no longer needed. Release its blocks before the
+            # extracted files begin consuming space.
+            raw.seek(0)
+            raw.truncate(0)
+            cpio.seek(0)
+            magic = cpio.read(6)
+            cpio.seek(0)
+            logging.info('upload %s: decoded to %d bytes, magic %r',
+                         tid, decoded, magic)
+            budget = ExtractionBudget(receive_budget.byte_limit)
+            with libarchive.stream_reader(cpio) as archive:
+                for entry in archive:
+                    budget.count_member()
+                    if not entry.isfile:
+                        continue
+                    if os.path.basename(entry.pathname).startswith('._'):
+                        continue
+                    declared = getattr(entry, 'size', 0)
+                    if declared > budget.byte_limit:
+                        raise UploadLimitError(
+                            f'file {entry.pathname!r} declares {declared} bytes')
+                    if budget.output_bytes + max(declared, 0) > budget.byte_limit:
+                        raise UploadLimitError(
+                            f'archive declares more than {budget.byte_limit} output bytes')
+                    base = safe_name(entry.pathname, 'file')
+                    name, output = open_new(dest, base)
+                    created.append(name)
+                    with output:
+                        sink = ExtractedFileWriter(output, budget, name)
+                        for block in entry.get_blocks():
+                            sink.write(block)
+                    written.append(name)
     except Exception:
-        name, f = open_new(dest, f'{tid}.dvzip')
-        with f:
-            f.write(raw)
-        logging.error('upload %s: kept raw body as %s after: %s', tid, name,
-                      ', '.join(written) or 'nothing extracted')
+        for name in reversed(created):
+            try:
+                os.unlink(os.path.join(dest, name))
+            except FileNotFoundError:
+                pass
         raise
     return written
 
@@ -366,17 +628,47 @@ class Handler(od_server.AirDropServerHandler):
       answers 406, which the sender reports as a failed transfer). Decode it.
     """
 
+    def setup(self):
+        # Applies to request headers and every body read. A peer that stops
+        # transmitting cannot hold one server thread forever.
+        self.request.settimeout(READ_IDLE_TIMEOUT_SECONDS)
+        super().setup()
+
+    def handle_expect_100(self):
+        # BaseHTTPRequestHandler would acknowledge an upload before its framing
+        # and disk-relative limit are validated. Defer only Upload; the other
+        # endpoints still need the normal automatic acknowledgement.
+        if self.path == '/Upload':
+            return True
+        return super().handle_expect_100()
+
+    def reject(self, status, reason):
+        logging.warning('%s rejected: %s', self.path, reason)
+        self.send_response(status)
+        self.send_header('Content-Length', '0')
+        self.send_header('Connection', 'close')
+        self.end_headers()
+        self.close_connection = True
+
     def do_POST(self):
         if PEERCERT_DIR:
             _capture_peer_cert(self.connection)
-        if (self.headers.get('Transfer-Encoding', '').lower() == 'chunked'
-                and self.path in ('/Discover', '/Ask')):
-            body = read_chunked(self.rfile)
+        if self.path in ('/Discover', '/Ask'):
+            try:
+                body = read_small_body(self.rfile, self.headers)
+            except socket.timeout:
+                self.reject(408, 'request body read timed out')
+                return
+            except RequestBodyError as e:
+                self.reject(e.status, str(e))
+                return
             orig = self.rfile
             self.rfile = io.BytesIO(body)
-            del self.headers['Transfer-Encoding']
+            if 'Transfer-Encoding' in self.headers:
+                del self.headers['Transfer-Encoding']
             self.headers['Content-Length'] = str(len(body))
-            logging.debug('dechunked %d-byte body for %s', len(body), self.path)
+            logging.debug('buffered bounded %d-byte body for %s',
+                          len(body), self.path)
             try:
                 super().do_POST()
             finally:
@@ -406,6 +698,10 @@ class Handler(od_server.AirDropServerHandler):
                      ','.join(ask.get('TransferType') or {}) or '?', len(files),
                      '; '.join(f"{f.get('FileName')} {f.get('FileType')} {f.get('FileSize')}B"
                                for f in files) or (ask.get('Items') or '-'))
+        items = ask.get('Items') or []
+        if len(items) > MAX_ARCHIVE_MEMBERS:
+            self.reject(413, f'Ask exceeds {MAX_ARCHIVE_MEMBERS}-item limit')
+            return
         # Contacts Only is enforced here rather than at /Discover, for two
         # reasons measured on 2026-09-18: a sender presents its Apple-issued
         # client certificate on /Ask and never on /Discover, and /Ask is the
@@ -441,7 +737,7 @@ class Handler(od_server.AirDropServerHandler):
         # make this machine visit an arbitrary URL. A file the user clicks is
         # the whole interaction we are willing to offer.
         if 'links' in (ask.get('TransferType') or {}):
-            for item in ask.get('Items') or []:
+            for item in items:
                 if not isinstance(item, str) or not item.startswith(('http://', 'https://')):
                     logging.warning('ask: ignoring non-http item %.80r', item)
                     continue
@@ -462,29 +758,52 @@ class Handler(od_server.AirDropServerHandler):
         # An Upload that never passed an Ask has nothing vouching for it, and
         # the Upload itself carries no validation record to judge.
         if contacts.visibility() == 'contacts' and not getattr(self, '_contacts_ok', False):
-            logging.warning('upload REFUSED (contacts only): no accepted Ask on this connection')
-            self.send_response(403)
-            self.send_header('Content-Length', '0')
-            self.end_headers()
+            self.reject(403, 'contacts-only upload has no accepted Ask')
             return
         ctype = self.headers.get('Content-Type', '').split(';')[0].strip().lower()
         if ctype != 'application/x-dvzip':
-            return super().handle_upload()
-        if self.headers.get('Expect', '').lower() == '100-continue':
-            self.send_response_only(100)
-            self.end_headers()
-        if self.headers.get('Transfer-Encoding', '').lower() == 'chunked':
-            raw = read_chunked(self.rfile)
-        else:
-            raw = self.rfile.read(int(self.headers.get('Content-Length', '0')))
+            self.reject(415, f'unsupported Content-Type {ctype!r}')
+            return
+        if not UPLOAD_SLOTS.acquire(blocking=False):
+            self.reject(503, 'too many uploads in progress')
+            return
         tid = safe_name(self.headers.get('TransferID', ''), 'upload')
-        logging.info('upload %s: %d bytes dvzip (TotalBytes %s)',
-                     tid, len(raw), self.headers.get('TotalBytes'))
         try:
-            written = store_upload(raw, DEST, tid)
+            receive_budget = ReceiveBudget(DEST, MAX_RECEIVE_PERCENT)
+            plan = body_plan(self.headers, receive_budget.byte_limit)
+            logging.info(
+                'upload %s: %d%% of %d free bytes allows %d bytes',
+                tid, receive_budget.percent, receive_budget.free_bytes,
+                receive_budget.byte_limit)
+            if self.headers.get('Expect', '').lower() == '100-continue':
+                self.send_response_only(100)
+                self.end_headers()
+            with tempfile.TemporaryFile(dir=DEST) as raw:
+                wire_bytes = read_request_body(
+                    self.rfile, self.headers, raw, receive_budget.byte_limit,
+                    check_disk=True, plan=plan)
+                raw.seek(0)
+                logging.info('upload %s: %d bytes dvzip (TotalBytes %s)',
+                             tid, wire_bytes, self.headers.get('TotalBytes'))
+                written = store_upload(raw, DEST, tid, receive_budget)
             logging.info('upload %s: stored %s', tid, ', '.join(written))
-        except Exception as e:  # the sender still sees success; the raw bytes are kept
-            logging.error('upload %s: %r', tid, e)
+        except socket.timeout:
+            self.reject(408, 'request body read timed out')
+            return
+        except (BodyTooLarge, UploadLimitError) as e:
+            self.reject(413, str(e))
+            return
+        except RequestBodyError as e:
+            self.reject(e.status, str(e))
+            return
+        except OSError as e:
+            self.reject(507, f'storage failed: {e}')
+            return
+        except Exception as e:
+            self.reject(422, f'upload is not a valid bounded DVZip archive: {e}')
+            return
+        finally:
+            UPLOAD_SLOTS.release()
         self.send_response(200)
         self.send_header('Content-Length', '0')
         self.end_headers()

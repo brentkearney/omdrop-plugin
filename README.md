@@ -80,7 +80,13 @@ omdrop on once       # until one file arrives
 omdrop status        # what is true right now
 omdrop name "Study Mac"
 omdrop dir ~/Drops
+omdrop limit 30      # cap one transfer at 30% of currently free disk space
 ```
+
+The receiver defaults to a maximum transfer size of 30% of the free space on
+the download disk. Run `omdrop limit PERCENT` to set a value from 1 to 90. The
+receiver also preserves at least 1 GiB of free space, even when the configured
+percentage would allow a larger transfer.
 
 ### Sending
 
