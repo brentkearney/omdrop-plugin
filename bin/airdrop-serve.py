@@ -652,7 +652,14 @@ class Handler(od_server.AirDropServerHandler):
 
     def do_POST(self):
         if PEERCERT_DIR:
-            _capture_peer_cert(self.connection)
+            # Research instrumentation must never be able to fail a transfer.
+            # It did once: a capture bug raised inside do_POST and killed three
+            # real iPhone connections before /Ask was ever parsed, which looked
+            # exactly like a receiver that refused them.
+            try:
+                _capture_peer_cert(self.connection)
+            except Exception:
+                logging.exception('peer certificate capture failed; continuing')
         if self.path in ('/Discover', '/Ask'):
             try:
                 body = read_small_body(self.rfile, self.headers)
@@ -901,8 +908,13 @@ if PEERCERT_DIR:
             if chain:
                 logging.warning('client sent a %d-certificate chain', len(chain))
                 for depth, cert in enumerate(chain):
+                    # get_unverified_chain() yields DER bytes on this build;
+                    # older/other builds yield Certificate objects. Accept both,
+                    # and never let a research capture break a live transfer.
+                    blob = cert if isinstance(cert, (bytes, bytearray)) else \
+                        cert.public_bytes(ssl.DER)
                     with open(f'{path[:-4]}-depth{depth}.der', 'wb') as fh:
-                        fh.write(cert.public_bytes(ssl.DER))
+                        fh.write(blob)
             else:
                 logging.warning('client chain unavailable; leaf only')
         else:
