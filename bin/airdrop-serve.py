@@ -828,16 +828,47 @@ config = AirDropConfig(host_name=args.host, computer_name=NAME,
 # that certificate is what binds a sender's Apple-signed validation record to
 # the live connection; a record on its own is handed to any prober that asks
 # and would otherwise be replayable. opendrop uses CERT_NONE and so never sees
-# one. CERT_OPTIONAL requests it and still accepts a peer that sends none, so
-# Everyone mode keeps working exactly as before.
+# one.
 #
-# OMDROP_PEERCERT additionally saves what arrives, for research.
+# Two things this has to get right, both learned the hard way on 2026-09-19:
+#
+# CERT_OPTIONAL means "a certificate may be absent", NOT "a certificate is
+# tolerated". A peer that does present one has it verified, and a failure
+# aborts the handshake with unknown_ca before any request is read. The context
+# opendrop builds trusts only Apple's root, while an Apple leaf is issued by
+# the "Apple Application Integration Certification Authority" intermediate, so
+# every Apple sender failed to chain and was refused at TLS. The intermediates
+# vendored beside contacts.py are the missing link; certificate_account()
+# already passes them for the same chain.
+#
+# Everyone mode goes back to CERT_NONE. Requesting a certificate there buys
+# nothing -- no code consults it -- and it can only turn a sender whose
+# certificate does not chain to Apple, such as a stock opendrop peer, into a
+# handshake failure. The old comment claimed Everyone mode was unaffected;
+# that was true of intent and false of behaviour.
+#
+# Measured scope of the defect, 2026-09-19: a Mac sends its full chain, so
+# macOS senders verified against the root alone and were never affected. What
+# broke was any sender presenting a bare leaf, which includes this project's
+# own sender -- and therefore every loopback test of the Contacts Only gate.
+#
+# OMDROP_PEERCERT saves what arrives, for research; it keeps the certificate
+# request alive in Everyone mode so a capture run still sees one.
 PEERCERT_DIR = os.environ.get('OMDROP_PEERCERT')
 _plain_context = config.get_ssl_context
 
 
 def _requesting_context():
     ctx = _plain_context()
+    if contacts.visibility() != 'contacts' and not PEERCERT_DIR:
+        return ctx
+    for intermediate in contacts.apple_intermediates():
+        try:
+            ctx.load_verify_locations(cafile=intermediate)
+        except (OSError, ssl.SSLError):
+            logging.warning('could not load Apple intermediate %s; a sender '
+                            'presenting an Apple certificate may be refused '
+                            'at TLS', os.path.basename(intermediate))
     ctx.verify_mode = ssl.CERT_OPTIONAL
     return ctx
 
