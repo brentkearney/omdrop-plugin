@@ -854,10 +854,12 @@ config = AirDropConfig(host_name=args.host, computer_name=NAME,
 # handshake failure. The old comment claimed Everyone mode was unaffected;
 # that was true of intent and false of behaviour.
 #
-# Measured scope of the defect, 2026-09-19: a Mac sends its full chain, so
-# macOS senders verified against the root alone and were never affected. What
-# broke was any sender presenting a bare leaf, which includes this project's
-# own sender -- and therefore every loopback test of the Contacts Only gate.
+# Measured scope of the defect, 2026-09-19: a Mac verified successfully against
+# a root-only store before this fix, which is only possible if it supplied the
+# intermediate, so macOS senders were never affected. iOS was measured directly
+# and sends a 2-certificate chain, leaf + AAI intermediate. What broke was any
+# sender presenting a bare leaf, which includes this project's own sender --
+# and therefore every loopback test of the Contacts Only gate.
 #
 # OMDROP_PEERCERT saves what arrives, for research; it keeps the certificate
 # request alive in Everyone mode so a capture run still sees one.
