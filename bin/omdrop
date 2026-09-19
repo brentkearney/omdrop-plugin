@@ -129,9 +129,10 @@ usage() {
 omdrop -- send and receive files with nearby Apple devices
 
   on [DURATION]     become visible to everyone nearby and receive files.
-                    Stops again after DURATION (default 10m); "forever" to
-                    stay on until you turn it off; "once" to stop after
-                    the first file arrives.
+                    Stops again after DURATION (default 10m). A bare number
+                    is minutes, so "on 3" is three minutes; "10m", "1h" and
+                    "30s" also work. "forever" stays on until you turn it
+                    off; "once" stops after the first file arrives.
   off               stop receiving and advertising, cancel any pending window
   toggle            off if receiving, on if not
   status [--json]   receiving or not, time left, the name Macs see
@@ -651,6 +652,11 @@ cmd_on() {
       # visible with no window when a window is exactly what was asked for.
       [[ "$dur" =~ ^[0-9]+(s|sec|m|min|h|hour|d|day)?$ ]] \
         || die "duration $dur: a systemd time span such as 10m or 1h, or \"once\" or \"forever\""
+      # A bare number means MINUTES. systemd reads it as seconds, so `omdrop on
+      # 3` opened a three-second window that was over before the user read the
+      # line saying it had opened. Minutes is what every example in the help
+      # uses and what anyone typing a bare number means.
+      [[ "$dur" =~ ^[0-9]+$ ]] && dur="${dur}m"
       secs=$(span_seconds "$dur")
       [[ -n "$secs" ]] || die "duration $dur: could not read that as a time span"
       # Zero means one-shot, which is how the panel's slider spells its floor.
