@@ -76,6 +76,9 @@ Everything the panel does is also available from the command line:
 
 ```bash
 omdrop on 10m        # visible to everyone for ten minutes
+omdrop on 3          # a bare number is minutes
+omdrop on -c 10m     # only known senders may send
+omdrop on -e 10m     # anyone nearby may send (the default)
 omdrop on once       # until one file arrives
 omdrop status        # what is true right now
 omdrop name "Study Mac"

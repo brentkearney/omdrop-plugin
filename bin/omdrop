@@ -128,11 +128,16 @@ usage() {
   cat <<'EOF'
 omdrop -- send and receive files with nearby Apple devices
 
-  on [DURATION]     become visible to everyone nearby and receive files.
+  on [-c|-e] [DURATION]
+                    become visible to nearby Apple devices and receive files.
                     Stops again after DURATION (default 10m). A bare number
                     is minutes, so "on 3" is three minutes; "10m", "1h" and
                     "30s" also work. "forever" stays on until you turn it
                     off; "once" stops after the first file arrives.
+                    -e/--everyone  anyone nearby may send (the default)
+                    -c/--contacts  only known senders may send
+                    Either flag also sets the saved visibility, so it stays
+                    that way until you change it back.
   off               stop receiving and advertising, cancel any pending window
   toggle            off if receiving, on if not
   status [--json]   receiving or not, time left, the name Macs see
@@ -643,6 +648,26 @@ $self_q firewall install"
 
 cmd_on() {
   require_unit
+
+  # -c/--contacts and -e/--everyone pick who may send during this window.
+  # They SET the saved visibility rather than applying for one window only: the
+  # receiver reads that setting per request, and a mode that silently reverted
+  # would be a privacy setting a user could not rely on. With no flag the saved
+  # setting stands, which is "everyone" until someone changes it.
+  local want_vis=
+  while (( $# )); do
+    case "$1" in
+      -c|--contacts) want_vis=contacts; shift ;;
+      -e|--everyone) want_vis=everyone; shift ;;
+      --)            shift; break ;;
+      -*)            die "omdrop on: unknown option $1. Use -c/--contacts or -e/--everyone." ;;
+      *)             break ;;
+    esac
+  done
+  (( $# <= 1 )) || die "omdrop on: one duration at a time, not \"$*\""
+
+  # Before anything is armed, so a rejected duration cannot leave the mode
+  # changed and the window closed.
   local dur=${1:-$DEFAULT_WINDOW} secs= mode=timed
   case "$dur" in
     forever) dur=; mode=forever ;;
@@ -663,6 +688,12 @@ cmd_on() {
       (( secs > 0 )) || { dur=; mode=once; }
       ;;
   esac
+
+  # Only now that the duration is known good.
+  if [[ -n "$want_vis" ]]; then
+    cmd_visibility "$want_vis" >/dev/null \
+      || die "omdrop on: could not switch to $want_vis, so nothing was turned on."
+  fi
 
   cancel_window
 
