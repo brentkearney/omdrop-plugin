@@ -839,8 +839,26 @@ print(json.dumps({
   local window="until you turn it off"
   [[ "$mode" == once ]] && window="until one file arrives"
   [[ -n "$left" ]] && window=$(printf '%d:%02d left' $((left / 60)) $((left % 60)))
+  # Who can actually send to us, not just whether the radio is advertising.
+  # "Visible to everyone" was printed even in contacts mode, which is the
+  # opposite of what that mode does and reads as a privacy failure.
+  local audience='to everyone' empty=0
+  if [[ "$(cmd_visibility)" == contacts ]]; then
+    local known; known=$(sender_count)
+    if (( known )); then
+      audience=$(printf 'to %d known sender%s' "$known" "$( (( known == 1 )) || printf s )")
+    else
+      empty=1
+    fi
+  fi
   case "$vis" in
-    true)    printf 'Visible to everyone as "%s" -- %s\n' "$(effective_name)" "$window" ;;
+    true)
+      if (( empty )); then
+        printf 'Visible as "%s" -- %s, but nobody can send: contacts only, and the known-senders list is empty\n' \
+          "$(effective_name)" "$window"
+      else
+        printf 'Visible %s as "%s" -- %s\n' "$audience" "$(effective_name)" "$window"
+      fi ;;
     false)   printf 'Receiving as "%s" -- %s, but NOT visible: the radio side is not advertising\n' \
                "$(effective_name)" "$window" ;;
     unknown) printf 'Receiving as "%s" -- %s (cannot tell if anyone can see us: %s is missing)\n' \
@@ -1223,6 +1241,18 @@ systemctl --user status $UNIT"
 }
 
 
+# How many senders the allow-list holds, ignoring comments and blank lines.
+# Counted in one place because three callers had their own copy of this
+# pipeline and `status` needed a fourth.
+sender_count() {
+  # `grep -c` prints 0 AND exits 1 on no match, so `$(grep -c … || echo 0)`
+  # yields "0\n0" and every arithmetic use of it fails. Take the exit status,
+  # not a second echo.
+  local n
+  n=$(grep -cvE '^\s*(#|$)' "$CONTACTS_DIR/known-senders" 2>/dev/null) || n=0
+  printf '%s\n' "${n:-0}"
+}
+
 cmd_visibility() {
   local vis_file="$CONTACTS_DIR/visibility"
   if (( $# == 0 )); then
@@ -1233,7 +1263,7 @@ cmd_visibility() {
     everyone) rm -f "$vis_file"
               printf 'Anyone nearby can send to this machine.\n' ;;
     contacts)
-      local n; n=$(grep -cvE '^\s*(#|$)' "$CONTACTS_DIR/known-senders" 2>/dev/null || echo 0)
+      local n; n=$(sender_count)
       mkdir -p "$CONTACTS_DIR"; printf 'contacts\n' > "$vis_file"
       printf 'Only known senders can send to this machine (%s listed).\n' "$n"
       (( n == 0 )) && printf 'The list is empty, so everything is refused. Add people with: omdrop senders add <email|phone>\n'
@@ -1256,7 +1286,7 @@ cmd_senders() {
       for id in "$@"; do
         grep -qxF "$id" "$f" 2>/dev/null || printf '%s\n' "$id" >> "$f"
       done
-      printf 'Added. %s known now.\n' "$(grep -cvE '^\s*(#|$)' "$f")" ;;
+      printf 'Added. %s known now.\n' "$(sender_count)" ;;
     remove|rm)
       (( $# )) || die "usage: omdrop senders remove <email-or-phone> [...]"
       [[ -f "$f" ]] || die "no known-senders list yet"
@@ -1264,7 +1294,7 @@ cmd_senders() {
       cp "$f" "$tmp"
       for id in "$@"; do grep -vxF "$id" "$tmp" > "$tmp.n" && mv "$tmp.n" "$tmp"; done
       mv "$tmp" "$f"
-      printf 'Removed. %s known now.\n' "$(grep -cvE '^\s*(#|$)' "$f")" ;;
+      printf 'Removed. %s known now.\n' "$(sender_count)" ;;
     *) die "usage: omdrop senders [list|add <id>|remove <id>]" ;;
   esac
 }
