@@ -1,6 +1,6 @@
 # Omdrop
 
-Send and receive files from nearby Apple devices over AirDrop on Apple Silicon devices running [Omarchy Linux](https://omarchy.org). 
+Send and receive files from nearby Apple devices over AirDrop on Apple Silicon devices running [Omarchy Linux](https://omarchy.org). Works in Everyone and Contacts Only mode, in both directions.
 
 https://github.com/user-attachments/assets/3e415609-6e25-48b0-b55f-58252c65356b
 
@@ -81,6 +81,29 @@ omdrop dir ~/Drops
 omdrop limit 30      # cap one transfer at 30% of currently free disk space
 ```
 
+#### Contacts Only
+
+By default anyone nearby can send to you. To accept files only from people you
+choose:
+
+```bash
+omdrop senders add you@example.com      # an Apple ID email or phone number
+omdrop senders list
+omdrop visibility contacts              # only those senders are accepted
+omdrop visibility everyone              # back to the default
+```
+
+A sender is accepted only if Apple's signature over their identity record is
+valid, that record is bound to the certificate on the live connection, and one
+of its identifiers is on your list. Anyone else is refused before a single byte
+of the file is read.
+
+The list holds addresses in the clear so you can read and edit it. They are
+hashed at comparison time and never written to a log.
+
+An empty list refuses everyone, and `omdrop visibility contacts` says so when
+that is the case.
+
 The receiver defaults to a maximum transfer size of 30% of the free space on
 the download disk. Run `omdrop limit PERCENT` to set a value from 1 to 90. The
 receiver also preserves at least 1 GiB of free space, even when the configured
@@ -88,21 +111,26 @@ percentage would allow a larger transfer.
 
 ### Sending
 
-Sending works, and it is proven to both a Mac and an iPhone, but it is a command line at the moment: the panel has no send button yet. The tools come with the [driver package](https://github.com/brentkearney/omdrop-awdl), and they need a receive window open first, because that is what fills the peer table they read.
+Sending is a command: the toolbar menu has no send button yet. Turn a window on first. That is what hears the devices around you, and what fills the peer table `send` chooses from.
 
 ```bash
-omdrop on 10m                                   # a window, so peers are registered
-/usr/lib/omdrop/send-to-peer --list             # who is within earshot, and where
-/usr/lib/omdrop/send-to-peer ~/photo.jpg        # the only peer heard
-/usr/lib/omdrop/send-to-peer --mac e2:9d:.. ~/photo.jpg
-/usr/lib/omdrop/send-to-peer --wait 120 ~/photo.jpg
+omdrop on 10m                                   # a window, so devices are heard
+omdrop peers                                    # who is within earshot
+omdrop send ~/photo.jpg                         # the only device heard
+omdrop send --to 6c:58:23 ~/photo.jpg           # any part of an address picks one
+omdrop send --wait 120 ~/photo.jpg              # keep trying for two minutes
+omdrop send --verbose ~/photo.jpg               # the protocol log, for a bug report
 ```
 
-Set the receiving Apple device to **Everyone**, or **Everyone for 10 Minutes** on iOS. Contacts Only is not supported: it rejects a self-signed certificate before any transfer starts. The recipient sees a prompt naming this computer and has to accept it, exactly as they would from an Apple device.
+`omdrop peers` reports an address and a signal strength for each device. AWDL addresses are randomized per session, so expect them to change.
+
+The receiving Apple device can be set to **Everyone** or to **Contacts Only**; both work. The recipient sees a prompt naming this computer and has to accept it, exactly as they would from an Apple device.
+
+Contacts Only needs an Apple-issued sender identity installed, which is what the receiving device checks you against. Without one, set the receiver to **Everyone**, or **Everyone for 10 Minutes** on iOS.
 
 **A Mac** answers immediately, whether or not its Finder AirDrop window is open.
 
-**An iPhone** only listens in short bursts, so a single attempt is a coin flip. `--wait` polls for the moment it starts listening and sends then. Opening a share sheet on the phone, or receiving anything on it, brings its listener up.
+**An iPhone** only listens in short bursts, so a single attempt is a coin flip. `omdrop send` polls for the moment its receiver comes up and sends then, for 30 seconds by default. `--wait SECONDS` extends that; `--wait 0` gives up as soon as the phone refuses a connection. Opening a share sheet on the phone, or receiving anything on it, brings its receiver up.
 
 
 ## Privileges
@@ -119,8 +147,9 @@ The UFW exception belongs to the receiver, not the driver package. Omdrop runs `
 If you encounter a bug, or have a feature request, [create an Issue](https://github.com/brentkearney/omdrop-plugin/issues) here. Or better yet, have your agent fix or implement it, and [create a Pull Request](https://github.com/brentkearney/omdrop-plugin/pulls). I'm happy to review and merge.
 
 #### Known Bugs / Limitations
-- No send button in the panel. Sending itself works from the command line, as [Use](#sending) describes; the UI for it is not built yet. PRs welcome, here for the panel or in [omdrop-awdl](https://github.com/brentkearney/omdrop-awdl/) for the sender.
-- Sending to an iPhone needs `--wait`, because iOS only keeps an AirDrop listener up in short bursts. A Mac has no such quirk.
+- No send button in the toolbar menu. Sending works from the command line, as [Sending](#sending) describes. PRs welcome, here for the menu or in [omdrop-awdl](https://github.com/brentkearney/omdrop-awdl/) for the sender.
+- One file per `omdrop send`. To send several, run it once per file.
+- A refused Contacts Only transfer shows as "Waiting..." on iOS rather than an error, so a refusal can look like a hang on the sending device.
 
 ## Trademark
 "AirDrop" is a trademark of Apple Inc. Omdrop is an independent project that is not affiliated with, authorized by, or endorsed by Apple.
