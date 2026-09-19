@@ -889,6 +889,22 @@ if PEERCERT_DIR:
             with open(path, 'wb') as fh:
                 fh.write(der)
             logging.warning('captured %d-byte client certificate -> %s', len(der), path)
+            # getpeercert() returns the LEAF only, so it cannot say whether the
+            # sender supplied its issuing intermediates. That distinction
+            # decides whether a receiver trusting only Apple's root can build
+            # the chain at all, which is exactly what the unknown_ca defect
+            # turned on.
+            try:
+                chain = conn.get_unverified_chain() or []
+            except (AttributeError, ValueError, NotImplementedError):
+                chain = []
+            if chain:
+                logging.warning('client sent a %d-certificate chain', len(chain))
+                for depth, cert in enumerate(chain):
+                    with open(f'{path[:-4]}-depth{depth}.der', 'wb') as fh:
+                        fh.write(cert.public_bytes(ssl.DER))
+            else:
+                logging.warning('client chain unavailable; leaf only')
         else:
             logging.warning('peer presented NO client certificate')
 
