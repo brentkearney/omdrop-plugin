@@ -47,7 +47,7 @@ PROJ="$(cd "$(dirname "$SELF")/.." && pwd)"
 # to drift. $0 rather than $SELF: the plugin's bin/omdrop is a symlink to a
 # source checkout during development, and resolving it lands next to the
 # script instead of next to the manifest that shipped it.
-VERSION_FALLBACK=0.4.0
+VERSION_FALLBACK=0.4.1
 omdrop_version() {
   local dir manifest version=
   dir=$(cd "$(dirname "$0")/.." 2>/dev/null && pwd) || dir=
@@ -387,6 +387,27 @@ cmd_setup() {
       || die "The receiving service was written, but systemd would not reload it. Log out and back in, then try again."
     did=1
     echo "Set up the service that receives files."
+  fi
+
+  # Put `omdrop` on the user's PATH. The plugin manifest has no way to declare
+  # a command -- schema 1 knows bar widgets, services and overlays, not binaries
+  # -- so nothing else does this, and every command in the README is unusable
+  # until something does. ~/.local/bin is on PATH by default on Omarchy.
+  #
+  # A symlink rather than a copy, so an update to the plugin updates the
+  # command too. Only ever replaced when it points into a plugin directory or
+  # is dangling: a user who put their own omdrop there outranks us.
+  local bindir="${XDG_BIN_HOME:-$HOME/.local/bin}" link current=''
+  link="$bindir/omdrop"
+  [[ -e "$link" || -L "$link" ]] && current=$(readlink -f "$link" 2>/dev/null)
+  if [[ -z "$current" || "$current" == */plugins/*/bin/omdrop ]]; then
+    if mkdir -p "$bindir" && ln -sfn "$plugin/bin/omdrop" "$link"; then
+      [[ "$current" == "$plugin/bin/omdrop" ]] || { did=1; echo "Put the omdrop command on your PATH at $link."; }
+    else
+      echo "omdrop could not create $link, so the omdrop command is not on your PATH. Create it by hand: ln -s $plugin/bin/omdrop $link" >&2
+    fi
+  elif [[ "$current" != "$plugin/bin/omdrop" ]]; then
+    echo "Left $link alone: it is not ours and points at $current." >&2
   fi
 
   if [[ -z "$(cfg_get name)" ]]; then
