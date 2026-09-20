@@ -163,7 +163,9 @@ omdrop -- send and receive files with nearby Apple devices
                     you. --to ADDRESS chooses one when several are heard, and
                     --wait SECONDS keeps trying for that long while an
                     iPhone's receiver is asleep (default 30).
-  peers             the Apple devices within earshot right now
+  peers [-n]        the Apple devices within earshot right now. -n also asks
+                    each one for its name, which means connecting to it and
+                    showing this machine to every device listed
   name [NEW]        show the name, or set it (restarts a running receiver)
   dir [PATH]        show the download folder, or set it
   limit [PERCENT]   show the maximum transfer size, or set it to 1-90% of
@@ -1085,9 +1087,25 @@ cmd_send() {
 }
 
 cmd_peers() {
-  (( $# == 0 )) || die "usage: omdrop peers"
+  # -n is opt-in because asking a peer its name means connecting to it, which
+  # shows this machine to every device listed. A bare `omdrop peers` stays
+  # passive: it reads the firmware peer table and transmits nothing.
+  local names=()
+  while (( $# )); do
+    case "$1" in
+      -n|--names) names=(--names); shift ;;
+      *) die "usage: omdrop peers [-n|--names]" ;;
+    esac
+  done
   require_sender
-  "$SENDER" --list
+  # The driver package owns the sender, and the two are versioned independently, so
+  # a plugin newer than the installed driver would otherwise hand a flag to a
+  # tool that has never heard of it and surface raw argparse output. Say what
+  # is actually wrong instead.
+  if (( ${#names[@]} )) && ! "$SENDER" --help 2>&1 | grep -q -- '--names'; then
+    die "Looking up peer names needs a newer Wi-Fi driver package. Update it with: omdrop install-driver"
+  fi
+  "$SENDER" --list "${names[@]}"
 }
 
 # The unit is hardened with ProtectHome=read-only, so the download folder has
