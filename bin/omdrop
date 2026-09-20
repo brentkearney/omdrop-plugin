@@ -580,7 +580,7 @@ DRIVER_PKG=brcmfmac-awdl-dkms
 # checkout below is detached at this SHA and the build only runs if it
 # succeeded. Bump it, in the same commit, whenever the plugin needs a newer
 # driver: the full 40 characters, because a short SHA is not a pin.
-DRIVER_COMMIT=8c18e56d3bef0d94ca664169cfb45e670186ac47
+DRIVER_COMMIT=e98346909c099f830287a939d1826fabc934995c
 
 # The AirDrop support library, pinned the same way and for a stronger reason:
 # the receiver imports opendrop and executes it, so its code is part of this
