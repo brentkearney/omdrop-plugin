@@ -261,9 +261,26 @@ cancel_window() {
 }
 
 # systemd time span -> whole seconds, for the radio primitive's argument.
+#
+# Read the MICROSECONDS line, not merely the first line whose value is all
+# digits. `systemd-analyze timespan` echoes the input back first:
+#
+#     Original: 5          <- all digits for a bare number
+#           µs: 5000000
+#        Human: 5s
+#
+# so a bare integer matched `Original:`, and 5/1000000 truncated to 0 -- which
+# cmd_on reads as the slider's floor and turns into a one-shot window. `omdrop
+# on 5` therefore answered "until one file arrives" (reported 2026-09-19).
+# Units hid it: `10m` echoes as `10m`, which is not all digits, so it fell
+# through to the right line by luck.
+#
+# Skipping the first line is what makes this correct for every input rather
+# than for the inputs we happened to try. The label is matched loosely because
+# it is a non-ASCII µ; the line number is the reliable part.
 span_seconds() {
   systemd-analyze timespan "$1" 2>/dev/null \
-    | awk -F': *' '$2 ~ /^[0-9]+$/ { printf "%d", $2 / 1000000; exit }'
+    | awk -F': *' 'NR > 1 && $2 ~ /^[0-9]+$/ { printf "%d", $2 / 1000000; exit }'
 }
 
 
