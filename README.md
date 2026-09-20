@@ -103,6 +103,21 @@ valid, that record is bound to the certificate on the live connection, and one
 of its identifiers is on your list. Anyone else is refused before a single byte
 of the file is read.
 
+A sender who identifies itself and is not on your list is not answered at
+discovery either, so it does not see this machine in its share sheet at all.
+
+**That hides you from an honest stranger, and only from an honest one.** A
+sender presents its Apple-issued certificate when it offers a file and never
+when it discovers, so at discovery there is nothing binding the identity record
+to the connection: someone replaying a known contact's record would still be
+answered — and would then be refused when they tried to send. Presence is
+hidden on a best-effort basis; *receiving* is enforced properly.
+
+A device that sends no identity record, or one that cannot be verified, is
+still answered. "We could not tell who this is" must not quietly become "hide
+from a device nobody has tested this against", and the transfer gate refuses
+such a sender anyway.
+
 The list holds addresses in the clear so you can read and edit it. They are
 hashed at comparison time and never written to a log.
 
