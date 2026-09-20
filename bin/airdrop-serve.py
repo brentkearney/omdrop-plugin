@@ -683,6 +683,41 @@ class Handler(od_server.AirDropServerHandler):
             return
         super().do_POST()
 
+    # Contacts Only should mean a stranger does not see this machine at all,
+    # which is what Apple's mode does and what the name implies. Until now it
+    # only refused the transfer: an unknown Mac received a full /Discover
+    # answer, tiled in its own share sheet, and was turned away at /Ask
+    # (measured 2026-09-20, 403 in 23 ms). Presence leaked -- name, model and
+    # the fact the machine exists.
+    #
+    # This hides us from an HONEST stranger and nothing more. /Discover carries
+    # SenderRecordData (3718 bytes from a real Mac, 2026-09-20) but no client
+    # certificate, so the record cannot be bound to the connection and a replay
+    # of a contact's record would still be answered. That is acceptable for
+    # deciding who sees a tile and NEVER acceptable for deciding who may send,
+    # which is why the transfer gate in handle_ask is untouched and still does
+    # the full cert-bound check.
+    #
+    # Silence rather than an error: a 403 here would tell the stranger the
+    # machine is there, which is the thing being hidden.
+    def handle_discover(self):
+        if contacts.visibility() == 'contacts':
+            body = self.rfile.read(int(self.headers.get('Content-Length', '0')))
+            self.rfile = io.BytesIO(body)
+            try:
+                record = (plistlib.loads(body) or {}).get('SenderRecordData')
+            except Exception:
+                record = None
+            outcome, detail = contacts.decide_discovery(record)
+            if outcome != contacts.ACCEPT:
+                logging.info('discovery withheld (contacts only): %s%s',
+                             contacts.WHY[outcome], f' [{detail}]' if detail else '')
+                self.send_response(401)
+                self.send_header('Content-Length', '0')
+                self.end_headers()
+                return
+        super().handle_discover()
+
     # 2026-09-12, iPhone on iOS 26, two link transfers: /Discover 200, /Ask 200
     # for a 108-byte `x-com.webloc`, then NO /Upload at all while the phone's
     # UI reported "Sent". OpenDrop answers an Ask with the two name keys only;

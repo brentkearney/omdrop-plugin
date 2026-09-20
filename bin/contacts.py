@@ -222,6 +222,38 @@ def decide(record, peer_cert, known=None, ca_file=None, untrusted=None):
     return REJECT_UNKNOWN, {"known_senders": len(known)}
 
 
+def decide_discovery(record, known=None, ca_file=None):
+    """May this sender even see us? Returns (outcome, detail).
+
+    DELIBERATELY WEAKER THAN `decide`, and usable only for discovery.
+
+    A sender presents its Apple-issued client certificate on /Ask and never on
+    /Discover (measured 2026-09-18), so at discovery time there is nothing to
+    bind the record to the live connection: anyone who can replay a known
+    contact's record can be answered. That is spoofable and must never gate a
+    transfer. `decide` stays the only thing that does.
+
+    What it is good for is not appearing in a stranger's share sheet, which is
+    what Apple's Contacts Only does and what this mode's name implies.
+
+    FAILS OPEN, and the direction matters: we hide only from a sender we have
+    positively identified as not being a contact. A missing, malformed or
+    expired record returns ACCEPT, because "we could not tell who this is" must
+    not become "hide from a device we have never measured" -- an iPhone that
+    omits the record would otherwise stop seeing this machine entirely. The
+    /Ask gate still refuses the transfer either way.
+    """
+    known = known_hashes() if known is None else known
+    if not record:
+        return ACCEPT, {"identified": False}
+    info = verify_record(record, ca_file)
+    if info is None or info["expired"]:
+        return ACCEPT, {"identified": False}
+    if known and info["hashes"] & known:
+        return ACCEPT, {"identified": True}
+    return REJECT_UNKNOWN, {"known_senders": len(known)}
+
+
 def visibility(path=None):
     """`everyone` (default) or `contacts`. Absent file means everyone, because
     a machine that silently refuses everybody is worse than one that asks."""
