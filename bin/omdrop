@@ -998,19 +998,44 @@ narrate_send() {
 # exit 1, "the table is empty", means an empty room.
 PEER=
 choose_peer() {
-  local want=${1,,} target=$2 listing rc rows=() matches=() row lines= quoted
-  listing=$("$SENDER" --list 2>&1); rc=$?
+  local want=${1,,} target=$2 listing rc rows=() matches=() row lines= quoted by_name=0
+  # A colon, or a full 12-hex MAC, is an address. Anything else is a device
+  # name -- and the test has to be that strict, because device names are often
+  # pure hex ("f0011" is one here) and treating such a name as an address
+  # fragment would silently pick the wrong machine.
+  if [[ -n "$want" && "$want" != *:* && ! "$want" =~ ^[0-9a-f]{12}$ ]]; then by_name=1; fi
+  # Names cost a connection per peer, so they are only asked for when a name
+  # is what was given. A device answers with its name only while it is
+  # receiving -- which is exactly the case here, since it has to be receiving
+  # to accept the file anyway.
+  if (( by_name )); then
+    listing=$("$SENDER" --list --names 2>&1); rc=$?
+  else
+    listing=$("$SENDER" --list 2>&1); rc=$?
+  fi
   (( rc == 0 || rc == 1 )) || die "$listing"
   mapfile -t rows < <(printf '%s\n' "$listing" \
-    | sed -nE 's/^(([0-9a-f]{2}:){5}[0-9a-f]{2})[[:space:]]+(-?[0-9]+) dBm.*/\1 \3/p')
+    | sed -nE 's/^(([0-9a-f]{2}:){5}[0-9a-f]{2})[[:space:]]+(-?[0-9]+|\?) dBm[[:space:]]+[^[:space:]]+[[:space:]]*(.*)$/\1|\3|\4/p')
   (( ${#rows[@]} )) \
     || die "No nearby Apple device found. A window is what finds them, so open one first:  omdrop on 10m"
 
   for row in "${rows[@]}"; do
-    [[ -z "$want" || "${row%% *}" == *"$want"* ]] && matches+=("$row")
+    local mac=${row%%|*} rest=${row#*|} name
+    name=${rest#*|}; name=${name,,}
+    if [[ -z "$want" ]]; then matches+=("$row")
+    elif (( by_name )); then
+      [[ "$name" == *"$want"* && "$name" != "(not receiving)" && "$name" != "(anonymous)" ]] && matches+=("$row")
+    else
+      [[ "$mac" == *"$want"* ]] && matches+=("$row")
+    fi
   done
   if (( ${#matches[@]} == 0 )); then
-    die "No device whose address contains \"$want\" was not found. See what was:  omdrop peers"
+    if (( by_name )); then
+      die "No device called \"$want\" is receiving right now. A device gives its name
+only while it is ready to receive, so open AirDrop on it and try again. What answered:
+$(printf '%s\n' "$listing" | sed 's/^/  /')"
+    fi
+    die "No device matching \"$want\" was found. See what is nearby:  omdrop peers"
   fi
   if (( ${#matches[@]} > 1 )); then
     # Each line is the command to run, not a description of one: the file is
@@ -1018,18 +1043,19 @@ choose_peer() {
     # to retype.
     printf -v quoted '%q' "$target"
     for row in "${matches[@]}"; do
+      local m=${row%%|*} r=${row#*|}; local rssi=${r%%|*} nm=${r#*|}
       lines+="
-  omdrop send --to ${row%% *} $quoted   (${row##* } dBm)"
+  omdrop send --to $m $quoted   (${rssi} dBm${nm:+, $nm})"
     done
     die "${want:+Several devices match \"$want\"}${want:-Several Apple devices were found}. Choose one:$lines"
   fi
   # Strongest signal first, because that is the order --list reports in: with
   # one match this is simply it.
-  PEER=${matches[0]%% *}
+  PEER=${matches[0]%%|*}
 }
 
 cmd_send() {
-  local file= to= wait=$DEFAULT_SEND_WAIT verbose=0 rc
+  local file= to= wait=$DEFAULT_SEND_WAIT verbose=0 rc; local -a rest=()
   while (( $# )); do
     case "$1" in
       --to)     shift; (( $# )) || die "send --to: the address of a device, as listed by: omdrop peers"; to=$1 ;;
@@ -1041,16 +1067,28 @@ cmd_send() {
       # have to know that; `--` is how they say so.
       --)       shift; break ;;
       -*)       die "send: no such option $1" ;;
-      *)        [[ -z "$file" ]] || die "send: one file at a time, but both $file and $1 were named"; file=$1 ;;
+      # Collected first, sorted afterwards: which positional is the file and
+      # which is the recipient is decided by the filesystem, not by position,
+      # so `omdrop send fred photo.jpg` and `omdrop send photo.jpg fred` both
+      # work. Someone reaching for this should not have to recall an order.
+      *)        rest+=("$1") ;;
     esac
     shift
   done
-  while (( $# )); do
-    [[ -z "$file" ]] || die "send: one file at a time, but both $file and $1 were named"
-    file=$1; shift
-  done
+  rest+=("$@")
+  case ${#rest[@]} in
+    0) ;;
+    1) if [[ -e "${rest[0]}" || -n "$to" ]]; then file=${rest[0]}; else to=${rest[0]}; fi ;;
+    2) if [[ -e "${rest[0]}" && -e "${rest[1]}" ]]; then
+         die "send: one file at a time, but both ${rest[0]} and ${rest[1]} exist"
+       elif [[ -e "${rest[1]}" ]]; then file=${rest[1]}; to=${rest[0]}
+       else file=${rest[0]}; to=${rest[1]}
+       fi ;;
+    *) die "send: one file and one recipient, but ${#rest[@]} were named" ;;
+  esac
 
-  [[ -n "$file" ]] || die "usage: omdrop send FILE [--to ADDRESS] [--wait SECONDS]"
+  [[ -n "$file" ]] || die "usage: omdrop send [RECIPIENT] FILE [--wait SECONDS]
+  RECIPIENT is a device name, as shown by \`omdrop peers -n\`, or part of an address."
   [[ -e "$file" ]] || die "$file: there is no such file"
   [[ ! -d "$file" ]] || die "$file: a folder cannot be sent -- send a file, or compress the folder first"
   [[ -f "$file" && -r "$file" ]] || die "$file: not a file that can be read"
@@ -1058,13 +1096,15 @@ cmd_send() {
   # instead of a polkit prompt and a Python traceback.
   [[ "$wait" =~ ^[0-9]+$ ]] \
     || die "send --wait: whole seconds, or 0 to give up the moment the device refuses a connection"
-  # An address is randomised per session and reported in full by `omdrop
-  # peers`; any part of one is enough to name a device, so this checks only
-  # that what was typed could be part of one.
+  # A recipient is either a device NAME or part of an address. Both are passed
+  # through untouched: the sender decides which it is, using the same rule --
+  # a colon or a full 12-hex MAC is an address, anything else is a name -- and
+  # duplicating that judgement here is how the two would drift apart.
+  #
+  # Names are not lowercased either. The sender matches case-insensitively,
+  # and folding the case here would only corrupt the message it prints back.
   if [[ -n "$to" ]]; then
-    to=${to,,}
-    [[ "$to" =~ ^[0-9a-f:]{2,17}$ ]] \
-      || die "send --to: part of an address, like 6c:58:23 -- run \`omdrop peers\` to see what was found"
+    [[ "$to" != *$'\n'* ]] || die "send: a recipient is one name or address, not several lines"
   fi
   require_sender
 
