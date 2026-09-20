@@ -1,6 +1,8 @@
 # Omdrop
 
-Send and receive files from nearby Apple devices over AirDrop on Apple Silicon devices running [Omarchy Linux](https://omarchy.org). Works in Everyone and Contacts Only mode, in both directions.
+Receive files from nearby Apple devices over AirDrop on Apple Silicon devices running [Omarchy Linux](https://omarchy.org). Sending is not working yet.
+
+This plugin is has been [submitted to the Omarchy Plugin Marketplace](https://github.com/omacom/omarchy-plugin-marketplace/issues/7021), pending review.
 
 https://github.com/user-attachments/assets/3e415609-6e25-48b0-b55f-58252c65356b
 
@@ -38,8 +40,6 @@ omarchy plugin enable netmojo.omdrop
 
 The widget lands on the right of the bar. Move it with `omarchy bar move netmojo.omdrop --section center`.
 
-`omdrop setup` puts the `omdrop` command on your PATH, at `~/.local/bin/omdrop`. It runs on first use from the panel; run it by hand after installing if you want the command straight away. A file already there that is not ours is left alone.
-
 On first use of the plugin, the panel opens a terminal to prompt for a password to install the [patched wifi driver](https://github.com/brentkearney/omdrop-awdl) and update your firewall rule to allow connections on the new virtual interface (TCP 8771 on `awdl0`, to/from an IPv6 link-local address). 
 
 Both dependencies are pinned to exact revisions, so what gets built is the code this release was tested against: the driver at a named commit of [omdrop-awdl](https://github.com/brentkearney/omdrop-awdl), and the AirDrop support library from a named commit of the `opendrop` AUR recipe, whose source tarball `makepkg` verifies against a recorded checksum. Neither is installed by bare package name.
@@ -61,8 +61,6 @@ pacman -R brcmfmac-awdl-dkms
 
 ## Use
 
-### Receiving
-
 Click the parachute icon to open the panel. Inside:
 
 - **The switch** turns receiving on and off. Right-clicking the bar icon does the same without opening the panel.
@@ -76,66 +74,11 @@ Everything the panel does is also available from the command line:
 
 ```bash
 omdrop on 10m        # visible to everyone for ten minutes
-omdrop on 3          # a bare number is minutes
-omdrop on -c 10m     # only known senders may send
-omdrop on -e 10m     # anyone nearby may send (the default)
 omdrop on once       # until one file arrives
 omdrop status        # what is true right now
 omdrop name "Study Mac"
 omdrop dir ~/Drops
-omdrop limit 30      # cap one transfer at 30% of currently free disk space
 ```
-
-#### Contacts Only
-
-By default anyone nearby can send to you. To accept files only from people you
-choose:
-
-```bash
-omdrop senders add you@example.com      # an Apple ID email or phone number
-omdrop senders list
-omdrop visibility contacts              # only those senders are accepted
-omdrop visibility everyone              # back to the default
-```
-
-A sender is accepted only if Apple's signature over their identity record is
-valid, that record is bound to the certificate on the live connection, and one
-of its identifiers is on your list. Anyone else is refused before a single byte
-of the file is read.
-
-The list holds addresses in the clear so you can read and edit it. They are
-hashed at comparison time and never written to a log.
-
-An empty list refuses everyone, and `omdrop visibility contacts` says so when
-that is the case.
-
-The receiver defaults to a maximum transfer size of 30% of the free space on
-the download disk. Run `omdrop limit PERCENT` to set a value from 1 to 90. The
-receiver also preserves at least 1 GiB of free space, even when the configured
-percentage would allow a larger transfer.
-
-### Sending
-
-Sending is a command: the toolbar menu has no send button yet. Turn a window on first. That is what hears the devices around you, and what fills the peer table `send` chooses from.
-
-```bash
-omdrop on 10m                                   # a window, so devices are heard
-omdrop peers                                    # who is within earshot
-omdrop send ~/photo.jpg                         # the only device heard
-omdrop send --to 6c:58:23 ~/photo.jpg           # any part of an address picks one
-omdrop send --wait 120 ~/photo.jpg              # keep trying for two minutes
-omdrop send --verbose ~/photo.jpg               # the protocol log, for a bug report
-```
-
-`omdrop peers` reports an address and a signal strength for each device. AWDL addresses are randomized per session, so expect them to change.
-
-The receiving Apple device can be set to **Everyone** or to **Contacts Only**; both work. The recipient sees a prompt naming this computer and has to accept it, exactly as they would from an Apple device.
-
-Contacts Only needs an Apple-issued sender identity installed, which is what the receiving device checks you against. Without one, set the receiver to **Everyone**, or **Everyone for 10 Minutes** on iOS.
-
-**A Mac** answers immediately, whether or not its Finder AirDrop window is open.
-
-**An iPhone** only listens in short bursts, so a single attempt is a coin flip. `omdrop send` polls for the moment its receiver comes up and sends then, for 30 seconds by default. `--wait SECONDS` extends that; `--wait 0` gives up as soon as the phone refuses a connection. Opening a share sheet on the phone, or receiving anything on it, brings its receiver up.
 
 
 ## Privileges
@@ -152,9 +95,7 @@ The UFW exception belongs to the receiver, not the driver package. Omdrop runs `
 If you encounter a bug, or have a feature request, [create an Issue](https://github.com/brentkearney/omdrop-plugin/issues) here. Or better yet, have your agent fix or implement it, and [create a Pull Request](https://github.com/brentkearney/omdrop-plugin/pulls). I'm happy to review and merge.
 
 #### Known Bugs / Limitations
-- No send button in the toolbar menu. Sending works from the command line, as [Sending](#sending) describes. PRs welcome, here for the menu or in [omdrop-awdl](https://github.com/brentkearney/omdrop-awdl/) for the sender.
-- One file per `omdrop send`. To send several, run it once per file.
-- A refused Contacts Only transfer shows as "Waiting..." on iOS rather than an error, so a refusal can look like a hang on the sending device.
+- No sending capability - I'm about 80% done reverse engineering native AirDrop sending on the BCM4387. Feel free to contribute PRs to the [omdrop-awdl](https://github.com/brentkearney/omdrop-awdl/) for this.
 
 ## Trademark
 "AirDrop" is a trademark of Apple Inc. Omdrop is an independent project that is not affiliated with, authorized by, or endorsed by Apple.
