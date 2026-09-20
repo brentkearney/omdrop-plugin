@@ -1105,7 +1105,25 @@ cmd_peers() {
   if (( ${#names[@]} )) && ! "$SENDER" --help 2>&1 | grep -q -- '--names'; then
     die "Looking up peer names needs a newer Wi-Fi driver package. Update it with: omdrop install-driver"
   fi
-  "$SENDER" --list "${names[@]}"
+  # An empty peer table has two causes and the sender cannot tell them apart:
+  # no window is open, or a window is open and nobody is within earshot. Only
+  # the first is something the person can act on, so decide it here, where the
+  # window state is known, rather than printing one sentence for both.
+  local out rc
+  out=$("$SENDER" --list "${names[@]}"); rc=$?
+  if (( rc == 1 )); then
+    # The RADIO, not the receiver: the receiver can be up with no window open,
+    # and it is the window that runs the peer watcher which fills this table.
+    if [[ "$("$DISCOVERABLE" status --json 2>/dev/null)" != *'"visible":true'* ]]; then
+      die "Omdrop is currently OFF. Turn it on to see peers."
+    fi
+    # A window IS open, so the sender's advice to open one is stale. Say the
+    # one thing that is true: nobody is there yet. Peers appear as they
+    # transmit, which for a Mac or iPhone means opening its share sheet.
+    die "Nobody is within earshot yet. A device appears here once it starts advertising -- open its AirDrop sheet."
+  fi
+  printf '%s\n' "$out"
+  return "$rc"
 }
 
 # The unit is hardened with ProtectHome=read-only, so the download folder has
