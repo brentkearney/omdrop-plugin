@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# omdrop -- receive files from nearby Apple devices.
+# omdrop -- send and receive files with nearby Apple devices.
 #
 # "omdrop" is this project's name for the feature. The protocol it speaks is
 # Apple's, and its wire identifiers are not ours to rename: the mDNS service
@@ -9,9 +9,8 @@
 # airdrop-serve.py, airdrop-receiver.service and ~/.config/airdrop/config.toml
 # are protocol- and service-layer names, not product ones.
 #
-# This command owns the two knobs that do not belong in the network panel: how
-# long the receive window stays open, and the name the sheet draws under our
-# tile.
+# This command owns the receive-window duration and receiver configuration
+# that do not belong in the panel.
 #
 # The panel's parachute button is a toggle and nothing more (design:
 # design/airdrop/). It shells out to `omdrop toggle` and reads
@@ -20,7 +19,8 @@
 # This wraps what already exists rather than inventing state:
 #   receiving on/off   systemctl --user airdrop-receiver.service
 #   the window         a transient systemd timer that stops that unit
-#   name / model       ~/.config/airdrop/config.toml, read by airdrop-serve.py
+#   name / model / directory / limit
+#                    ~/.config/airdrop/config.toml, read by airdrop-serve.py
 # There is no daemon of our own and no state file. `status` asks systemd, so
 # it stays right when the service dies, the timer fires, or someone runs
 # systemctl by hand.
@@ -43,18 +43,35 @@ SELF="$(readlink -f "$0")"
 PROJ="$(cd "$(dirname "$SELF")/.." && pwd)"
 
 # The version a bug report needs. manifest.json is the single source of truth
-# -- the marketplace reads it, so a constant here would be a second one, free
-# to drift. $0 rather than $SELF: the plugin's bin/omdrop is a symlink to a
-# source checkout during development, and resolving it lands next to the
-# script instead of next to the manifest that shipped it.
-VERSION_FALLBACK=0.3.0
+# -- the marketplace reads it -- and the constant below is only a last resort.
+#
+# Resolve $0 before looking for the manifest. Invoked through the
+# ~/.local/bin/omdrop symlink that `setup` creates, an unresolved $0 puts the
+# search in ~/.local, which holds no manifest, so the constant was printed
+# instead. That is how `omdrop version` reported 0.4.1 while the installed
+# manifest said 0.4.0 and concealed a stale install.
+#
+# A fallback that silently substitutes for the real value is the same class of
+# defect as a status line reporting a state that was never entered, so this one
+# says when it is guessing, and says when the two disagree.
+VERSION_FALLBACK=0.4.1
 omdrop_version() {
-  local dir manifest version=
-  dir=$(cd "$(dirname "$0")/.." 2>/dev/null && pwd) || dir=
+  local dir manifest version= real
+  real=$(readlink -f "$0" 2>/dev/null) || real="$0"
+  dir=$(cd "$(dirname "$real")/.." 2>/dev/null && pwd) || dir=
   manifest="$dir/manifest.json"
   [[ -n "$dir" && -r "$manifest" ]] \
     && version=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest" | head -1)
-  printf '%s\n' "${version:-$VERSION_FALLBACK}"
+  if [[ -z "$version" ]]; then
+    printf '%s\n' "$VERSION_FALLBACK"
+    printf 'omdrop: could not read a version from %s, so %s is this script only and may not be what is installed.\n' \
+      "${manifest:-manifest.json}" "$VERSION_FALLBACK" >&2
+    return
+  fi
+  printf '%s\n' "$version"
+  [[ "$version" == "$VERSION_FALLBACK" ]] || \
+    printf 'omdrop: the installed manifest says %s but this script is from %s. The install is mismatched; reinstall the plugin.\n' \
+      "$version" "$VERSION_FALLBACK" >&2
 }
 
 # The radio half: makes us discoverable to Everyone (AWDL _airdrop
@@ -79,9 +96,34 @@ fi
 # symlink it would ask for a password every single time.
 [[ -e "$DISCOVERABLE" ]] && DISCOVERABLE=$(readlink -f "$DISCOVERABLE")
 
+# The sending half, found the same way and for the same reason: send-to-peer
+# ships with the driver package, not with this plugin, because what it needs
+# -- the firmware's peer table -- belongs to the radio side. Absent = `send`
+# and `peers` say so and name the command that installs it.
+SENDER="${OMDROP_SENDER:-}"
+[[ -n "$SENDER" || ! -x /usr/lib/omdrop/send-to-peer ]] \
+  || SENDER=/usr/lib/omdrop/send-to-peer
+if [[ -z "$SENDER" ]]; then
+  SENDER=$(command -v send-to-peer 2>/dev/null || true)
+fi
+[[ -n "$SENDER" ]] || SENDER="$PROJ/tools/send-to-peer"
+# Resolve symlinks here too: send-to-peer finds the radio helper and
+# airdrop-send.py beside itself, through __file__, which argparse-era Python
+# does not resolve. Invoked through a symlink it would look for both in a
+# directory that holds neither.
+[[ -e "$SENDER" ]] && SENDER=$(readlink -f "$SENDER")
+
 # Being visible to Everyone is not a state to leave on by accident, so `on`
 # is bounded unless you say otherwise. Ten minutes is what iOS uses.
 DEFAULT_WINDOW=10m
+
+# An iPhone does not keep an AirDrop listener up while it is merely
+# discoverable -- it opens one in short bursts -- so a single attempt at one
+# is a coin flip, and the first thing anyone hits is a refused connection. The
+# sender polls for the burst instead, and this is how long `send` gives it.
+# A Mac in Everyone mode listens throughout and never spends a second of it:
+# the poll is skipped entirely when the port is already open.
+DEFAULT_SEND_WAIT=30
 
 # The watcher announces every file that lands and, in one-file mode, turns us
 # off after the first. There is no separate unit for that mode: `omdrop-once`
@@ -101,17 +143,35 @@ die() { printf '%s\n' "$*" >&2; exit 1; }
 
 usage() {
   cat <<'EOF'
-omdrop -- receive files from nearby Apple devices
+omdrop -- send and receive files with nearby Apple devices
 
-  on [DURATION]     become visible to everyone nearby and receive files.
-                    Stops again after DURATION (default 10m); "forever" to
-                    stay on until you turn it off; "once" to stop after
-                    the first file arrives.
+  on [-c|-e] [DURATION]
+                    become visible to nearby Apple devices and receive files.
+                    Stops again after DURATION (default 10m). A bare number
+                    is minutes, so "on 3" is three minutes; "10m", "1h" and
+                    "30s" also work. "forever" stays on until you turn it
+                    off; "once" stops after the first file arrives.
+                    -e/--everyone  anyone nearby may send (the default)
+                    -c/--contacts  only known senders may send
+                    Either flag also sets the saved visibility, so it stays
+                    that way until you change it back.
   off               stop receiving and advertising, cancel any pending window
   toggle            off if receiving, on if not
   status [--json]   receiving or not, time left, the name Macs see
+  send FILE         send a file to a nearby Apple device. Turn a window on
+                    first (omdrop on): that is what hears the devices around
+                    you. --to ADDRESS chooses one when several are heard, and
+                    --wait SECONDS keeps trying for that long while an
+                    iPhone's receiver is asleep (default 30).
+  peers             the Apple devices within earshot right now
   name [NEW]        show the name, or set it (restarts a running receiver)
   dir [PATH]        show the download folder, or set it
+  limit [PERCENT]   show the maximum transfer size, or set it to 1-90% of
+                    currently free space (default 30%)
+  visibility [MODE]  show, or set to "everyone" (default) or "contacts".
+                     In contacts mode only known senders may send to you.
+  senders [add|remove ID | list]
+                     manage the known-senders list (emails and phone numbers)
   setup             install what receiving needs: the service, the name Macs
                     see, and this computer's certificate. Safe to run again.
   doctor [--json]   what is still missing before this can receive
@@ -122,7 +182,9 @@ omdrop -- receive files from nearby Apple devices
 Examples:
   omdrop on 10m
   omdrop on forever
+  omdrop send ~/photo.jpg
   omdrop name "Brent's Omarchy"
+  omdrop limit 30
 EOF
 }
 
@@ -136,6 +198,13 @@ require_unit() {
 
 receiving() {
   [[ "$(systemctl --user is-active "$UNIT" 2>/dev/null)" == active ]]
+}
+
+# awdl0 carrying an IPv6 link-local address: the only address AirDrop traffic
+# is sent from or to, in either direction. Without it there is nothing to send
+# over and nothing to bind, whatever else is configured.
+awdl_link_local() {
+  ip -6 addr show dev awdl0 scope link 2>/dev/null | grep -q inet6
 }
 
 
@@ -218,6 +287,7 @@ tildify() { local p=$1; printf '%s\n' "${p/#$HOME/\~}"; }
 default_name() { hostname -s 2>/dev/null || echo omdrop; }
 effective_name() { local n; n=$(cfg_get name); [[ -n "$n" ]] && printf '%s\n' "$n" || default_name; }
 effective_dir() { local d; d=$(cfg_get download_dir); [[ -n "$d" ]] && printf '%s\n' "$d" || printf '%s\n' "$HOME/Downloads"; }
+effective_limit() { local n; n=$(cfg_get max_receive_percent); printf '%s\n' "${n:-30}"; }
 
 cfg_get() {
   CONFIG="$CONFIG" python3 - "$1" <<'PY'
@@ -246,12 +316,20 @@ except FileNotFoundError:
     cfg = {}
 except tomllib.TOMLDecodeError as e:
     sys.exit(f'{path}: {e}')
-cfg[key] = val
+cfg[key] = int(val) if key == 'max_receive_percent' else val
 fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix='.config.toml.')
 with os.fdopen(fd, 'w') as f:
     for k, v in cfg.items():
-        esc = v.replace('\\', '\\\\').replace('"', '\\"')
-        f.write(f'{k} = "{esc}"\n')
+        if isinstance(v, bool):
+            rendered = 'true' if v else 'false'
+        elif isinstance(v, int):
+            rendered = str(v)
+        elif isinstance(v, str):
+            esc = v.replace('\\', '\\\\').replace('"', '\\"')
+            rendered = f'\"{esc}\"'
+        else:
+            sys.exit(f'{path}: cannot preserve unsupported value for {k}')
+        f.write(f'{k} = {rendered}\n')
 os.chmod(tmp, 0o644)
 os.replace(tmp, path)
 PY
@@ -332,6 +410,27 @@ cmd_setup() {
       || die "The receiving service was written, but systemd would not reload it. Log out and back in, then try again."
     did=1
     echo "Set up the service that receives files."
+  fi
+
+  # Put `omdrop` on the user's PATH. The plugin manifest has no way to declare
+  # a command -- schema 1 knows bar widgets, services and overlays, not binaries
+  # -- so nothing else does this, and every command in the README is unusable
+  # until something does. ~/.local/bin is on PATH by default on Omarchy.
+  #
+  # A symlink rather than a copy, so an update to the plugin updates the
+  # command too. Only ever replaced when it points into a plugin directory or
+  # is dangling: a user who put their own omdrop there outranks us.
+  local bindir="${XDG_BIN_HOME:-$HOME/.local/bin}" link current=''
+  link="$bindir/omdrop"
+  [[ -e "$link" || -L "$link" ]] && current=$(readlink -f "$link" 2>/dev/null)
+  if [[ -z "$current" || "$current" == */plugins/*/bin/omdrop ]]; then
+    if mkdir -p "$bindir" && ln -sfn "$plugin/bin/omdrop" "$link"; then
+      [[ "$current" == "$plugin/bin/omdrop" ]] || { did=1; echo "Put the omdrop command on your PATH at $link."; }
+    else
+      echo "omdrop could not create $link, so the omdrop command is not on your PATH. Create it by hand: ln -s $plugin/bin/omdrop $link" >&2
+    fi
+  elif [[ "$current" != "$plugin/bin/omdrop" ]]; then
+    echo "Left $link alone: it is not ours and points at $current." >&2
   fi
 
   if [[ -z "$(cfg_get name)" ]]; then
@@ -566,6 +665,26 @@ $self_q firewall install"
 
 cmd_on() {
   require_unit
+
+  # -c/--contacts and -e/--everyone pick who may send during this window.
+  # They SET the saved visibility rather than applying for one window only: the
+  # receiver reads that setting per request, and a mode that silently reverted
+  # would be a privacy setting a user could not rely on. With no flag the saved
+  # setting stands, which is "everyone" until someone changes it.
+  local want_vis=
+  while (( $# )); do
+    case "$1" in
+      -c|--contacts) want_vis=contacts; shift ;;
+      -e|--everyone) want_vis=everyone; shift ;;
+      --)            shift; break ;;
+      -*)            die "omdrop on: unknown option $1. Use -c/--contacts or -e/--everyone." ;;
+      *)             break ;;
+    esac
+  done
+  (( $# <= 1 )) || die "omdrop on: one duration at a time, not \"$*\""
+
+  # Before anything is armed, so a rejected duration cannot leave the mode
+  # changed and the window closed.
   local dur=${1:-$DEFAULT_WINDOW} secs= mode=timed
   case "$dur" in
     forever) dur=; mode=forever ;;
@@ -575,12 +694,23 @@ cmd_on() {
       # visible with no window when a window is exactly what was asked for.
       [[ "$dur" =~ ^[0-9]+(s|sec|m|min|h|hour|d|day)?$ ]] \
         || die "duration $dur: a systemd time span such as 10m or 1h, or \"once\" or \"forever\""
+      # A bare number means MINUTES. systemd reads it as seconds, so `omdrop on
+      # 3` opened a three-second window that was over before the user read the
+      # line saying it had opened. Minutes is what every example in the help
+      # uses and what anyone typing a bare number means.
+      [[ "$dur" =~ ^[0-9]+$ ]] && dur="${dur}m"
       secs=$(span_seconds "$dur")
       [[ -n "$secs" ]] || die "duration $dur: could not read that as a time span"
       # Zero means one-shot, which is how the panel's slider spells its floor.
       (( secs > 0 )) || { dur=; mode=once; }
       ;;
   esac
+
+  # Only now that the duration is known good.
+  if [[ -n "$want_vis" ]]; then
+    cmd_visibility "$want_vis" >/dev/null \
+      || die "omdrop on: could not switch to $want_vis, so nothing was turned on."
+  fi
 
   cancel_window
 
@@ -632,7 +762,7 @@ cmd_on() {
     return 1
   }
   local receiver_first=0
-  ip -6 addr show dev awdl0 scope link 2>/dev/null | grep -q inet6 && receiver_first=1
+  awdl_link_local && receiver_first=1
 
   # systemd latches a unit that failed too often: once the start limit is hit,
   # every later `start` is refused outright with no attempt made, and the panel
@@ -757,13 +887,182 @@ print(json.dumps({
   local window="until you turn it off"
   [[ "$mode" == once ]] && window="until one file arrives"
   [[ -n "$left" ]] && window=$(printf '%d:%02d left' $((left / 60)) $((left % 60)))
+  # Who can actually send to us, not just whether the radio is advertising.
+  # "Visible to everyone" was printed even in contacts mode, which is the
+  # opposite of what that mode does and reads as a privacy failure.
+  local audience='to everyone' empty=0
+  if [[ "$(cmd_visibility)" == contacts ]]; then
+    local known; known=$(sender_count)
+    if (( known )); then
+      audience=$(printf 'to %d known sender%s' "$known" "$( (( known == 1 )) || printf s )")
+    else
+      empty=1
+    fi
+  fi
   case "$vis" in
-    true)    printf 'Visible to everyone as "%s" -- %s\n' "$(effective_name)" "$window" ;;
+    true)
+      if (( empty )); then
+        printf 'Visible as "%s" -- %s, but nobody can send: contacts only, and the known-senders list is empty\n' \
+          "$(effective_name)" "$window"
+      else
+        printf 'Visible %s as "%s" -- %s\n' "$audience" "$(effective_name)" "$window"
+      fi ;;
     false)   printf 'Receiving as "%s" -- %s, but NOT visible: the radio side is not advertising\n' \
                "$(effective_name)" "$window" ;;
     unknown) printf 'Receiving as "%s" -- %s (cannot tell if anyone can see us: %s is missing)\n' \
                "$(effective_name)" "$window" "${DISCOVERABLE#$PROJ/}" ;;
   esac
+}
+
+# ------------------------------------------------------------------- sending
+#
+# Sending needs no service, no window and no state of our own: it is one
+# outbound connection to a device the radio can already hear. What it does
+# need is the radio, because the peer table the sender picks from is the
+# firmware's, and that is filled while awdl0 is up.
+#
+# send-to-peer dials a peer's EUI-64 link-local address directly instead of
+# browsing mDNS: an Apple device in Everyone mode answers /Discover while
+# publishing no `_airdrop._tcp` instance at all, so a sender that waits for
+# one waits forever. It drives airdrop-send.py over that endpoint.
+require_sender() {
+  [[ -x "$SENDER" ]] \
+    || die "The program that sends files is not installed. It comes with the Wi-Fi driver: omdrop install-driver"
+  opendrop_installed \
+    || die "The AirDrop support library is not installed. Install it with: omdrop install-driver"
+  awdl_link_local \
+    || die "The Apple-compatible radio is not running, so nobody can be heard and nothing can be sent. Start it with: omdrop on 10m"
+}
+
+# The sender speaks in debug log lines, deliberately: a transfer that goes
+# wrong is a protocol problem and that log is how it gets diagnosed. Somebody
+# sending a photo needs four sentences out of it, so this turns the lines that
+# carry one into a sentence and drops the rest. `--verbose` prints the log
+# untouched, which is what a bug report wants.
+narrate_send() {
+  local line rest name stat
+  while IFS= read -r line; do
+    case "$line" in
+      *"; asking"*)             printf 'Asking them to accept it...\n' ;;
+      *"ASK -> accepted"*)      printf 'They accepted. Sending...\n' ;;
+      *"ASK -> declined"*)      printf 'They declined it.\n' >&2 ;;
+      *"ASK failed: "*)         printf 'They never answered: %s\n' "${line#*ASK failed: }" >&2 ;;
+      *"UPLOAD failed: "*)      printf 'The transfer failed: %s\n' "${line#*UPLOAD failed: }" >&2 ;;
+      *"UPLOAD "*" -> FAILED"*) printf 'The transfer failed.\n' >&2 ;;
+      *"UPLOAD "*" -> ok ("*)
+        rest=${line#*UPLOAD }; name=${rest%% -> ok *}; stat=${line##*-> ok (}
+        printf 'Sent %s (%s)\n' "$name" "${stat%)}" ;;
+    esac
+  done
+}
+
+# Which device the file is going to, left in PEER.
+#
+# Chosen here rather than left to the sender for two reasons. The sender's
+# name for this is `--mac`, so its refusals ("several peers heard; choose one
+# with --mac") name an option `omdrop send` does not have and send the reader
+# in a circle. And an AWDL address is randomised per session -- nobody is
+# going to read all six bytes off one listing and type them back -- so any
+# unambiguous part of one is accepted here.
+#
+# A table that could not be read is NOT an empty room: reporting a helper that
+# never ran as "nobody is nearby" sent a debugging session after the radio
+# when the answer was polkit (send-to-peer's own lesson, 2026-09-18). Only its
+# exit 1, "the table is empty", means an empty room.
+PEER=
+choose_peer() {
+  local want=${1,,} target=$2 listing rc rows=() matches=() row lines= quoted
+  listing=$("$SENDER" --list 2>&1); rc=$?
+  (( rc == 0 || rc == 1 )) || die "$listing"
+  mapfile -t rows < <(printf '%s\n' "$listing" \
+    | sed -nE 's/^(([0-9a-f]{2}:){5}[0-9a-f]{2})[[:space:]]+(-?[0-9]+) dBm.*/\1 \3/p')
+  (( ${#rows[@]} )) \
+    || die "No Apple device is within earshot. A window is what hears them, so open one first:  omdrop on 10m"
+
+  for row in "${rows[@]}"; do
+    [[ -z "$want" || "${row%% *}" == *"$want"* ]] && matches+=("$row")
+  done
+  if (( ${#matches[@]} == 0 )); then
+    die "No device whose address contains \"$want\" is within earshot. See who is with:  omdrop peers"
+  fi
+  if (( ${#matches[@]} > 1 )); then
+    # Each line is the command to run, not a description of one: the file is
+    # already in hand, and the address is six random bytes nobody should have
+    # to retype.
+    printf -v quoted '%q' "$target"
+    for row in "${matches[@]}"; do
+      lines+="
+  omdrop send --to ${row%% *} $quoted   (${row##* } dBm)"
+    done
+    die "${want:+Several devices match \"$want\"}${want:-Several Apple devices are within earshot}. Choose one:$lines"
+  fi
+  # Strongest signal first, because that is the order --list reports in: with
+  # one match this is simply it.
+  PEER=${matches[0]%% *}
+}
+
+cmd_send() {
+  local file= to= wait=$DEFAULT_SEND_WAIT verbose=0 rc
+  while (( $# )); do
+    case "$1" in
+      --to)     shift; (( $# )) || die "send --to: the address of a device, as listed by: omdrop peers"; to=$1 ;;
+      --to=*)   to=${1#--to=} ;;
+      --wait)   shift; (( $# )) || die "send --wait: a number of seconds"; wait=$1 ;;
+      --wait=*) wait=${1#--wait=} ;;
+      -v|--verbose) verbose=1 ;;
+      # A filename may begin with a dash, and the person holding it should not
+      # have to know that; `--` is how they say so.
+      --)       shift; break ;;
+      -*)       die "send: no such option $1" ;;
+      *)        [[ -z "$file" ]] || die "send: one file at a time, but both $file and $1 were named"; file=$1 ;;
+    esac
+    shift
+  done
+  while (( $# )); do
+    [[ -z "$file" ]] || die "send: one file at a time, but both $file and $1 were named"
+    file=$1; shift
+  done
+
+  [[ -n "$file" ]] || die "usage: omdrop send FILE [--to ADDRESS] [--wait SECONDS]"
+  [[ -e "$file" ]] || die "$file: there is no such file"
+  [[ ! -d "$file" ]] || die "$file: a folder cannot be sent -- send a file, or compress the folder first"
+  [[ -f "$file" && -r "$file" ]] || die "$file: not a file that can be read"
+  # Checked here rather than left to the sender, so a typo costs a sentence
+  # instead of a polkit prompt and a Python traceback.
+  [[ "$wait" =~ ^[0-9]+$ ]] \
+    || die "send --wait: whole seconds, or 0 to give up the moment the device refuses a connection"
+  # An address is randomised per session and reported in full by `omdrop
+  # peers`; any part of one is enough to name a device, so this checks only
+  # that what was typed could be part of one.
+  if [[ -n "$to" ]]; then
+    to=${to,,}
+    [[ "$to" =~ ^[0-9a-f:]{2,17}$ ]] \
+      || die "send --to: part of an address, like 6c:58:23 -- run \`omdrop peers\` to see who is within earshot"
+  fi
+  require_sender
+
+  choose_peer "$to" "$file"
+
+  # The name Apple devices already know this computer by. The prompt on their
+  # screen should say the same thing whichever way the file is going, and the
+  # sender's own default ("Omarchy") is nobody's machine in particular.
+  local cmd=("$SENDER" --name "$(effective_name)" --wait "$wait" --mac "$PEER" -- "$file")
+
+  if (( verbose )); then
+    "${cmd[@]}"
+    return
+  fi
+  # PIPESTATUS, not $?: the narrator always succeeds, and the answer to "did
+  # the file arrive" is the sender's exit status.
+  "${cmd[@]}" | narrate_send
+  rc=${PIPESTATUS[0]}
+  return "$rc"
+}
+
+cmd_peers() {
+  (( $# == 0 )) || die "usage: omdrop peers"
+  require_sender
+  "$SENDER" --list
 }
 
 # The unit is hardened with ProtectHome=read-only, so the download folder has
@@ -964,6 +1263,90 @@ systemctl --user status $UNIT"
   printf 'Files will land in %s\n' "$new"
 }
 
+# Contacts Only. The receiver reads these two files directly (see bin/contacts.py):
+# visibility switches the mode, known-senders is the allow-list of identifiers.
+CONTACTS_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/omdrop"
+
+cmd_limit() {
+  if (( $# == 0 )); then
+    printf '%s%%\n' "$(effective_limit)"
+    return
+  fi
+  (( $# == 1 )) || die "usage: omdrop limit [PERCENT]"
+  local new=$1 old
+  [[ "$new" =~ ^[0-9]+$ ]] || die "limit: an integer from 1 to 90"
+  new=$((10#$new))
+  (( new >= 1 && new <= 90 )) || die "limit: an integer from 1 to 90"
+  old=$(effective_limit)
+  cfg_set max_receive_percent "$new" || die "could not write $CONFIG"
+  if receiving && ! systemctl --user restart "$UNIT"; then
+    cfg_set max_receive_percent "$old"
+    systemctl --user restart "$UNIT" >/dev/null 2>&1 || true
+    die "the receiver refused ${new}%, so the limit is still ${old}%.
+systemctl --user status $UNIT"
+  fi
+  printf 'A transfer may use up to %s%% of currently free download-disk space.\n' "$new"
+}
+
+
+# How many senders the allow-list holds, ignoring comments and blank lines.
+# Counted in one place because three callers had their own copy of this
+# pipeline and `status` needed a fourth.
+sender_count() {
+  # `grep -c` prints 0 AND exits 1 on no match, so `$(grep -c … || echo 0)`
+  # yields "0\n0" and every arithmetic use of it fails. Take the exit status,
+  # not a second echo.
+  local n
+  n=$(grep -cvE '^\s*(#|$)' "$CONTACTS_DIR/known-senders" 2>/dev/null) || n=0
+  printf '%s\n' "${n:-0}"
+}
+
+cmd_visibility() {
+  local vis_file="$CONTACTS_DIR/visibility"
+  if (( $# == 0 )); then
+    printf '%s\n' "$([[ $(cat "$vis_file" 2>/dev/null) == contacts ]] && echo contacts || echo everyone)"
+    return
+  fi
+  case "$1" in
+    everyone) rm -f "$vis_file"
+              printf 'Anyone nearby can send to this machine.\n' ;;
+    contacts)
+      local n; n=$(sender_count)
+      mkdir -p "$CONTACTS_DIR"; printf 'contacts\n' > "$vis_file"
+      printf 'Only known senders can send to this machine (%s listed).\n' "$n"
+      (( n == 0 )) && printf 'The list is empty, so everything is refused. Add people with: omdrop senders add <email|phone>\n'
+      ;;
+    *) die "usage: omdrop visibility [everyone|contacts]" ;;
+  esac
+  receiving && systemctl --user restart "$UNIT" >/dev/null 2>&1 || true
+}
+
+cmd_senders() {
+  local f="$CONTACTS_DIR/known-senders"
+  local sub=${1:-list}; shift || true
+  case "$sub" in
+    list)
+      [[ -s "$f" ]] && grep -vE '^\s*(#|$)' "$f" || printf '(no known senders yet)\n' ;;
+    add)
+      (( $# )) || die "usage: omdrop senders add <email-or-phone> [...]"
+      mkdir -p "$CONTACTS_DIR"; touch "$f"
+      local id
+      for id in "$@"; do
+        grep -qxF "$id" "$f" 2>/dev/null || printf '%s\n' "$id" >> "$f"
+      done
+      printf 'Added. %s known now.\n' "$(sender_count)" ;;
+    remove|rm)
+      (( $# )) || die "usage: omdrop senders remove <email-or-phone> [...]"
+      [[ -f "$f" ]] || die "no known-senders list yet"
+      local id tmp; tmp=$(mktemp)
+      cp "$f" "$tmp"
+      for id in "$@"; do grep -vxF "$id" "$tmp" > "$tmp.n" && mv "$tmp.n" "$tmp"; done
+      mv "$tmp" "$f"
+      printf 'Removed. %s known now.\n' "$(sender_count)" ;;
+    *) die "usage: omdrop senders [list|add <id>|remove <id>]" ;;
+  esac
+}
+
 cmd_name() {
   if (( $# == 0 )); then
     printf '%s\n' "$(effective_name)"
@@ -995,8 +1378,13 @@ case "${1:-status}" in
   off)    shift; cmd_off ;;
   toggle) shift; cmd_toggle "$@" ;;
   status) shift; cmd_status "$@" ;;
+  send)   shift; cmd_send "$@" ;;
+  peers)  shift; cmd_peers "$@" ;;
   name)   shift; cmd_name "$@" ;;
   dir)    shift; cmd_dir "$@" ;;
+  limit)  shift; cmd_limit "$@" ;;
+  visibility|vis) shift; cmd_visibility "$@" ;;
+  senders) shift; cmd_senders "$@" ;;
   setup)  shift; cmd_setup "$@" ;;
   doctor) shift; cmd_doctor "$@" ;;
   install-driver) shift; cmd_install_driver ;;
