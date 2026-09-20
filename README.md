@@ -149,6 +149,10 @@ omdrop send --verbose ~/photo.jpg               # the protocol log, for a bug re
 
 `omdrop peers` reports an address and a signal strength for each device. AWDL addresses are randomized per session, so expect them to change.
 
+`omdrop peers -n` also asks each device for its name. Asking means connecting to it, which shows this machine to every device listed, so it is opt-in.
+
+A device is named only while it is **receiving**. An Apple device runs no AirDrop listener otherwise — measured 2026-09-20 on a Mac whose share sheet was open, with nothing bound to its AirDrop port — so `(not receiving)` describes the peer rather than a failure here, and no other Mac could name it either. `(anonymous)` means the device answered but withheld its name, which it does when it does not recognize the sender.
+
 The receiving Apple device can be set to **Everyone** or to **Contacts Only**; both work. The recipient sees a prompt naming this computer and has to accept it, exactly as they would from an Apple device.
 
 Contacts Only needs an Apple-issued sender identity installed, which is what the receiving device checks you against. Without one, set the receiver to **Everyone**, or **Everyone for 10 Minutes** on iOS.
