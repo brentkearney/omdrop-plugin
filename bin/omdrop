@@ -1024,7 +1024,7 @@ choose_peer() {
     name=${rest#*|}; name=${name,,}
     if [[ -z "$want" ]]; then matches+=("$row")
     elif (( by_name )); then
-      [[ "$name" == *"$want"* && "$name" != "(not receiving)" && "$name" != "(anonymous)" ]] && matches+=("$row")
+      [[ "$name" == *"$want"* && "$name" != "(no response)" && "$name" != "(anonymous)" ]] && matches+=("$row")
     else
       [[ "$mac" == *"$want"* ]] && matches+=("$row")
     fi

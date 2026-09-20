@@ -151,7 +151,7 @@ omdrop send --verbose ~/photo.jpg               # the protocol log, for a bug re
 
 `omdrop peers -n` also asks each device for its name. Asking means connecting to it, which shows this machine to every device listed, so it is opt-in.
 
-A device is named only while it is **receiving**. An Apple device runs no AirDrop listener otherwise — measured 2026-09-20 on a Mac whose share sheet was open, with nothing bound to its AirDrop port — so `(not receiving)` describes the peer rather than a failure here, and no other Mac could name it either. `(anonymous)` means the device answered but withheld its name, which it does when it does not recognize the sender.
+A device is named only while it is **receiving**: measured 2026-09-20, the one peer with Finder → AirDrop open answered and named itself, and seven others did not answer at all. `(no response)` says only that — nothing answered on the AirDrop port — because the cause cannot be told apart from here. `(anonymous)` means the device answered but withheld its name, which it does when it does not recognize the sender.
 
 The receiving Apple device can be set to **Everyone** or to **Contacts Only**; both work. The recipient sees a prompt naming this computer and has to accept it, exactly as they would from an Apple device.
 
