@@ -903,22 +903,23 @@ print(json.dumps({
   # the wrong end condition.
   local window="until you turn it off"
   [[ "$mode" == once ]] && window="until one file arrives"
-  [[ -n "$left" ]] && window=$(printf '%d:%02d left' $((left / 60)) $((left % 60)))
-  # Visibility and permission to send are two different things, and conflating
-  # them produced a false line in both directions. "Visible to everyone" was
-  # printed in contacts mode, which reads as a privacy failure; the fix then
-  # printed "Visible to 1 known sender", which is equally untrue the other way
-  # -- the machine advertises to everyone nearby in EVERY mode, and contacts
-  # mode refuses at the moment a file is offered, not at discovery. Measured
-  # 2026-09-20: a Mac on an unknown account received a full /Discover response
-  # and appeared in its own share sheet, then was refused at /Ask with 403.
+  [[ -n "$left" ]] && window=$(printf 'for %d:%02d minutes' $((left / 60)) $((left % 60)))
+  # Name the audience, which is now true rather than aspirational: in contacts
+  # mode a sender that identifies itself and is not on the list is refused at
+  # /Discover, so it never sees this machine. Measured 2026-09-20: a Mac on an
+  # unknown account got 401 to ten successive /Discover attempts and did not
+  # appear in its own share sheet, while a listed account discovered and
+  # transferred normally.
   #
-  # So say both: everyone can see this machine, and name who may send.
-  local sending='' empty=0
+  # The one caveat this line cannot carry is in the README: a device that sends
+  # no identity record, or one we cannot verify, is still answered, because
+  # "we could not tell who this is" must not become "hide from a device nobody
+  # has tested against". Such a sender is still refused at /Ask.
+  local audience='to everyone' empty=0
   if [[ "$(cmd_visibility)" == contacts ]]; then
     local known; known=$(sender_count)
     if (( known )); then
-      sending=$(printf '; only %d known sender%s may send' "$known" "$( (( known == 1 )) || printf s )")
+      audience=$(printf 'to %d known sender%s' "$known" "$( (( known == 1 )) || printf s )")
     else
       empty=1
     fi
@@ -926,10 +927,10 @@ print(json.dumps({
   case "$vis" in
     true)
       if (( empty )); then
-        printf 'Visible to everyone as "%s" -- %s, but nobody can send: contacts only, and the known-senders list is empty\n' \
+        printf 'Visible as "%s" %s, but nobody can send: contacts only, and the known-senders list is empty\n' \
           "$(effective_name)" "$window"
       else
-        printf 'Visible to everyone as "%s" -- %s%s\n' "$(effective_name)" "$window" "$sending"
+        printf 'Visible %s as "%s" %s\n' "$audience" "$(effective_name)" "$window"
       fi ;;
     false)   printf 'Receiving as "%s" -- %s, but NOT visible: the radio side is not advertising\n' \
                "$(effective_name)" "$window" ;;
