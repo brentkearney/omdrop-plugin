@@ -904,14 +904,21 @@ print(json.dumps({
   local window="until you turn it off"
   [[ "$mode" == once ]] && window="until one file arrives"
   [[ -n "$left" ]] && window=$(printf '%d:%02d left' $((left / 60)) $((left % 60)))
-  # Who can actually send to us, not just whether the radio is advertising.
-  # "Visible to everyone" was printed even in contacts mode, which is the
-  # opposite of what that mode does and reads as a privacy failure.
-  local audience='to everyone' empty=0
+  # Visibility and permission to send are two different things, and conflating
+  # them produced a false line in both directions. "Visible to everyone" was
+  # printed in contacts mode, which reads as a privacy failure; the fix then
+  # printed "Visible to 1 known sender", which is equally untrue the other way
+  # -- the machine advertises to everyone nearby in EVERY mode, and contacts
+  # mode refuses at the moment a file is offered, not at discovery. Measured
+  # 2026-09-20: a Mac on an unknown account received a full /Discover response
+  # and appeared in its own share sheet, then was refused at /Ask with 403.
+  #
+  # So say both: everyone can see this machine, and name who may send.
+  local sending='' empty=0
   if [[ "$(cmd_visibility)" == contacts ]]; then
     local known; known=$(sender_count)
     if (( known )); then
-      audience=$(printf 'to %d known sender%s' "$known" "$( (( known == 1 )) || printf s )")
+      sending=$(printf '; only %d known sender%s may send' "$known" "$( (( known == 1 )) || printf s )")
     else
       empty=1
     fi
@@ -919,10 +926,10 @@ print(json.dumps({
   case "$vis" in
     true)
       if (( empty )); then
-        printf 'Visible as "%s" -- %s, but nobody can send: contacts only, and the known-senders list is empty\n' \
+        printf 'Visible to everyone as "%s" -- %s, but nobody can send: contacts only, and the known-senders list is empty\n' \
           "$(effective_name)" "$window"
       else
-        printf 'Visible %s as "%s" -- %s\n' "$audience" "$(effective_name)" "$window"
+        printf 'Visible to everyone as "%s" -- %s%s\n' "$(effective_name)" "$window" "$sending"
       fi ;;
     false)   printf 'Receiving as "%s" -- %s, but NOT visible: the radio side is not advertising\n' \
                "$(effective_name)" "$window" ;;

@@ -118,6 +118,11 @@ still answered. "We could not tell who this is" must not quietly become "hide
 from a device nobody has tested this against", and the transfer gate refuses
 such a sender anyway.
 
+Measured 2026-09-20, before the discovery gate: a Mac on a different Apple ID
+received a full `/Discover` response and was then refused at `/Ask` with 403 in
+23 ms, before any file data was read. A Mac on a known account was accepted and
+the file stored.
+
 The list holds addresses in the clear so you can read and edit it. They are
 hashed at comparison time and never written to a log.
 
