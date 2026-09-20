@@ -140,7 +140,7 @@ Sending is a command: the toolbar menu has no send button yet. Turn a window on 
 
 ```bash
 omdrop on 10m                                   # a window, so devices are heard
-omdrop peers                                    # who is within earshot
+omdrop peers                                    # what is nearby
 omdrop send ~/photo.jpg                         # the only device heard
 omdrop send --to 6c:58:23 ~/photo.jpg           # any part of an address picks one
 omdrop send --wait 120 ~/photo.jpg              # keep trying for two minutes

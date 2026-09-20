@@ -163,7 +163,7 @@ omdrop -- send and receive files with nearby Apple devices
                     you. --to ADDRESS chooses one when several are heard, and
                     --wait SECONDS keeps trying for that long while an
                     iPhone's receiver is asleep (default 30).
-  peers [-n]        the Apple devices within earshot right now. -n also asks
+  peers [-n]        the Apple devices nearby right now. -n also asks
                     each one for its name, which means connecting to it and
                     showing this machine to every device listed
   name [NEW]        show the name, or set it (restarts a running receiver)
@@ -1004,13 +1004,13 @@ choose_peer() {
   mapfile -t rows < <(printf '%s\n' "$listing" \
     | sed -nE 's/^(([0-9a-f]{2}:){5}[0-9a-f]{2})[[:space:]]+(-?[0-9]+) dBm.*/\1 \3/p')
   (( ${#rows[@]} )) \
-    || die "No Apple device is within earshot. A window is what hears them, so open one first:  omdrop on 10m"
+    || die "No nearby Apple device found. A window is what finds them, so open one first:  omdrop on 10m"
 
   for row in "${rows[@]}"; do
     [[ -z "$want" || "${row%% *}" == *"$want"* ]] && matches+=("$row")
   done
   if (( ${#matches[@]} == 0 )); then
-    die "No device whose address contains \"$want\" is within earshot. See who is with:  omdrop peers"
+    die "No device whose address contains \"$want\" was not found. See what was:  omdrop peers"
   fi
   if (( ${#matches[@]} > 1 )); then
     # Each line is the command to run, not a description of one: the file is
@@ -1021,7 +1021,7 @@ choose_peer() {
       lines+="
   omdrop send --to ${row%% *} $quoted   (${row##* } dBm)"
     done
-    die "${want:+Several devices match \"$want\"}${want:-Several Apple devices are within earshot}. Choose one:$lines"
+    die "${want:+Several devices match \"$want\"}${want:-Several Apple devices were found}. Choose one:$lines"
   fi
   # Strongest signal first, because that is the order --list reports in: with
   # one match this is simply it.
@@ -1064,7 +1064,7 @@ cmd_send() {
   if [[ -n "$to" ]]; then
     to=${to,,}
     [[ "$to" =~ ^[0-9a-f:]{2,17}$ ]] \
-      || die "send --to: part of an address, like 6c:58:23 -- run \`omdrop peers\` to see who is within earshot"
+      || die "send --to: part of an address, like 6c:58:23 -- run \`omdrop peers\` to see what was found"
   fi
   require_sender
 
@@ -1106,7 +1106,7 @@ cmd_peers() {
     die "Looking up peer names needs a newer Wi-Fi driver package. Update it with: omdrop install-driver"
   fi
   # An empty peer table has two causes and the sender cannot tell them apart:
-  # no window is open, or a window is open and nobody is within earshot. Only
+  # no window is open, or a window is open and no device has been found. Only
   # the first is something the person can act on, so decide it here, where the
   # window state is known, rather than printing one sentence for both.
   local out rc
@@ -1120,7 +1120,7 @@ cmd_peers() {
     # A window IS open, so the sender's advice to open one is stale. Say the
     # one thing that is true: nobody is there yet. Peers appear as they
     # transmit, which for a Mac or iPhone means opening its share sheet.
-    die "Nobody is within earshot yet. A device appears here once it starts advertising -- open its AirDrop sheet."
+    die "No devices found yet. Open the AirDrop sheet on the device you want to see, then run this again."
   fi
   printf '%s\n' "$out"
   return "$rc"
