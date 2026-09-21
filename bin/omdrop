@@ -165,7 +165,11 @@ omdrop -- send and receive files with nearby Apple devices
                     iPhone's receiver is asleep (default 30).
   peers [-n]        the Apple devices nearby right now. -n also asks
                     each one for its name, which means connecting to it and
-                    showing this machine to every device listed
+                    showing this machine to every device listed, and briefly
+                    announcing this Apple ID over Bluetooth so a "Contacts
+                    Only" device will answer at all. --no-wake skips the
+                    announcement; names then come only from devices that are
+                    already listening
   name [NEW]        show the name, or set it (restarts a running receiver)
   dir [PATH]        show the download folder, or set it
   limit [PERCENT]   show the maximum transfer size, or set it to 1-90% of
@@ -1130,11 +1134,18 @@ cmd_peers() {
   # -n is opt-in because asking a peer its name means connecting to it, which
   # shows this machine to every device listed. A bare `omdrop peers` stays
   # passive: it reads the firmware peer table and transmits nothing.
-  local names=()
+  #
+  # -n also raises a BLE advert carrying this account's contact hashes for the
+  # few seconds the lookup runs, because a Contacts Only device keeps its
+  # AirDrop server shut until it recognizes one -- without it, names resolve
+  # only from devices something else has woken. --no-wake asks for the lookup
+  # without that broadcast.
+  local names=() wake=()
   while (( $# )); do
     case "$1" in
       -n|--names) names=(--names); shift ;;
-      *) die "usage: omdrop peers [-n|--names]" ;;
+      --no-wake) wake=(--no-wake); shift ;;
+      *) die "usage: omdrop peers [-n|--names] [--no-wake]" ;;
     esac
   done
   require_sender
@@ -1150,7 +1161,7 @@ cmd_peers() {
   # the first is something the person can act on, so decide it here, where the
   # window state is known, rather than printing one sentence for both.
   local out rc
-  out=$("$SENDER" --list "${names[@]}"); rc=$?
+  out=$("$SENDER" --list "${names[@]}" "${wake[@]}"); rc=$?
   if (( rc == 1 )); then
     # The RADIO, not the receiver: the receiver can be up with no window open,
     # and it is the window that runs the peer watcher which fills this table.
