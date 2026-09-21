@@ -45,6 +45,10 @@ systemctl(){{ log "systemctl $*"; }}
 pkexec(){{ log "pkexec $*"; return {radio}; }}
 ip(){{ return 1; }}
 die(){{ log "die $*"; exit 9; }}
+# cmd_on brings the radio up through the spinner, which lives outside this
+# fragment. Run the command and drop the animation: what this file tests is
+# the ORDER the window is armed in, and a spinner would only add frames.
+spinner_while(){{ shift; "$@"; }}
 cmd_status(){{ log status; }}
 {fragment}
 cmd_on {window}
