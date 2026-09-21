@@ -776,7 +776,20 @@ cmd_on() {
   radio_up() {
     [[ -x "$DISCOVERABLE" ]] || return 0
     local out rc
-    out=$(pkexec "$DISCOVERABLE" start "${secs:-0}" 2>&1 >/dev/null); rc=$?
+    # Bringing the radio up takes seven or eight seconds -- awdl0 has to come
+    # up and prove it is receiving -- so it gets the same animation as naming.
+    #
+    # Only when the grant is passwordless, though: if pkexec has to ask for a
+    # password it writes its prompt to the same terminal, and a spinner erasing
+    # that line every 100 ms would stamp on the thing the person is trying to
+    # type into. --disable-internal-agent makes the probe fail instead of
+    # prompting, so asking is free and never surprises anyone.
+    if pkexec --disable-internal-agent "$DISCOVERABLE" status >/dev/null 2>&1; then
+      out=$(spinner_while "waking the radio" \
+              pkexec "$DISCOVERABLE" start "${secs:-0}" 2>&1 >/dev/null); rc=$?
+    else
+      out=$(pkexec "$DISCOVERABLE" start "${secs:-0}" 2>&1 >/dev/null); rc=$?
+    fi
     # 5 is "already starting or already visible": a race with a window that is
     # already coming up, not a refusal. Anything else is a real failure.
     (( rc == 0 || rc == 5 )) && return 0
@@ -1130,6 +1143,61 @@ cmd_send() {
   return "$rc"
 }
 
+# Run any slow command with a live "still working" line, so a wait that is
+# working is not mistaken for one that has hung.
+#
+# The animation goes to /dev/tty, NOT to stdout or stderr. Both of those are
+# captured somewhere in this script -- `peers` reads the listing off stdout,
+# `on` reads the helper's complaint off stderr -- and a spinner frame in
+# either would end up parsed as data or printed back at the person later.
+# /dev/tty is the terminal the human is actually looking at, and when there is
+# none (a pipe, a service, a test) the command simply runs with no animation.
+#
+# The command keeps this shell's stdout and stderr, so output still streams and
+# $(...) still captures it; only the frames are diverted. Callers that want the
+# output should capture the call exactly as they would have without this.
+#
+# Braille frames because they are one column wide in every terminal font we
+# have; a multi-column glyph leaves droppings when the line is erased.
+# The verbs rotate every few seconds. That is not decoration: a frame that
+# spins but never changes its words looks the same whether the command is
+# working or wedged, and the elapsed counter beside them is the thing that
+# actually answers "is this hung". Keep them short, gerunds, and honest about
+# the fact that we are waiting on somebody else's radio.
+SPINNER_VERBS=(Hollering Eavesdropping Doorknocking Wheedling Coaxing
+               Cajoling Rummaging Earwigging Loitering Dowsing
+               Beachcombing Wittering Pestering Hobnobbing)
+
+spinner_while() {
+  local label=$1; shift
+  # Opening it, not testing its mode: /dev/tty is a character device with
+  # world write permission whether or not this process HAS a controlling
+  # terminal, so `[[ -w /dev/tty ]]` is true inside a daemon or a test harness
+  # and every frame then fails with "No such device or address".
+  { : >/dev/tty; } 2>/dev/null || { "$@"; return $?; }
+  local frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏' i=0 pid rc start now verb
+  local v=$(( RANDOM % ${#SPINNER_VERBS[@]} ))
+  "$@" &
+  pid=$!
+  start=$SECONDS
+  # Erase the line and put the cursor back however this ends, including a
+  # Ctrl-C that takes the shell down mid-frame. A hidden cursor left behind
+  # outlives the command and breaks the terminal the person keeps using.
+  trap 'printf "\r\033[K\033[?25h" >/dev/tty 2>/dev/null' EXIT INT TERM
+  printf '\033[?25l' >/dev/tty
+  while kill -0 "$pid" 2>/dev/null; do
+    now=$(( SECONDS - start ))
+    verb=${SPINNER_VERBS[ (v + now / 4) % ${#SPINNER_VERBS[@]} ]}
+    printf '\r\033[K%s %s… (%ds · %s)' \
+           "${frames:i++%${#frames}:1}" "$verb" "$now" "$label" >/dev/tty
+    sleep 0.1
+  done
+  wait "$pid"; rc=$?
+  printf '\r\033[K\033[?25h' >/dev/tty
+  trap - EXIT INT TERM
+  return "$rc"
+}
+
 cmd_peers() {
   # -n is opt-in because asking a peer its name means connecting to it, which
   # shows this machine to every device listed. A bare `omdrop peers` stays
@@ -1161,7 +1229,17 @@ cmd_peers() {
   # the first is something the person can act on, so decide it here, where the
   # window state is known, rather than printing one sentence for both.
   local out rc
-  out=$("$SENDER" --list "${names[@]}" "${wake[@]}"); rc=$?
+  # Naming takes fifteen to twenty seconds: the advert has to be recognized,
+  # the peer has to start its AirDrop server, and the first /Discover is
+  # usually killed by that server's own restart and retried. Measured 15.5-17.6
+  # s per call on 2026-09-21. Silence that long reads as a hang. A bare listing
+  # transmits nothing and returns at once, so it gets no animation.
+  if (( ${#names[@]} )); then
+    out=$(spinner_while "Asking nearby devices for their names" \
+            "$SENDER" --list "${names[@]}" "${wake[@]}"); rc=$?
+  else
+    out=$("$SENDER" --list); rc=$?
+  fi
   if (( rc == 1 )); then
     # The RADIO, not the receiver: the receiver can be up with no window open,
     # and it is the window that runs the peer watcher which fills this table.
