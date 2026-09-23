@@ -90,9 +90,20 @@ Panel {
   Timer {
     interval: 450
     repeat: true
-    running: root.busy || root.settling || root.radarWorking
+    running: root.busy || root.settling
     onTriggered: root.busyDots = root.busyDots.length >= 3 ? "." : root.busyDots + "."
     onRunningChanged: if (!running) root.busyDots = "."
+  }
+
+  // The radar's status line counts through ".", "..", "..." and then none,
+  // so the pause reads as a breath rather than a stall.
+  property string radarDots: "."
+  Timer {
+    interval: 450
+    repeat: true
+    running: root.radarWorking
+    onTriggered: root.radarDots = root.radarDots === "..." ? "" : root.radarDots + "."
+    onRunningChanged: if (!running) root.radarDots = "."
   }
 
   Timer {
@@ -923,16 +934,40 @@ Panel {
             // What the radar is doing, until there is nothing left to say:
             // searching until a device is heard, resolving until the first
             // name lookup has answered, then gone.
-            Text {
+            //
+            // The words stay still and only the dots move: the sentence is
+            // centred as if it always carried three dots, and the dots grow to
+            // its right in their own Text. Centring the whole string instead
+            // shifted every word left and right as the dots changed.
+            Item {
               width: parent.width
               visible: root.radarWorking
-              horizontalAlignment: Text.AlignHCenter
-              textFormat: Text.PlainText
-              text: root.radarStatus + root.busyDots
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
-              elide: Text.ElideRight
+              implicitHeight: statusWords.implicitHeight
+
+              TextMetrics {
+                id: threeDots
+                font: statusWords.font
+                text: "..."
+              }
+
+              Text {
+                id: statusWords
+                x: Math.max(0, Math.round((parent.width - implicitWidth - threeDots.advanceWidth) / 2))
+                textFormat: Text.PlainText
+                text: root.radarStatus
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+
+              Text {
+                anchors.left: statusWords.right
+                anchors.baseline: statusWords.baseline
+                textFormat: Text.PlainText
+                text: root.radarDots
+                color: root.dim
+                font: statusWords.font
+              }
             }
 
             // The devices that can be sent to, first under the heading, where a
