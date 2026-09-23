@@ -2,11 +2,11 @@ import QtQuick
 import QtQuick.Shapes
 import qs.Commons
 
-// A parachute carrying a box. Nothing in a Nerd Font draws this, and an SVG
-// asset would not follow the bar's foreground colour, so it is a Shape:
-// authored on a 24 grid and scaled to whatever the caller asks for, which
-// keeps the stroke proportional at every size. Five strokes -- dome, the
-// chord that closes it, two rigging lines, and the payload.
+// A drop: a triangle pointing down into the box it lands in. Nothing in a Nerd
+// Font draws this, and an SVG asset would not follow the bar's foreground
+// colour, so it is a Shape authored on a 24 grid and scaled to whatever the
+// caller asks for. The triangle is filled so it keeps its weight beside the
+// bar's glyph icons at 12 px, where a stroked outline thins to a hairline.
 Item {
   id: root
 
@@ -14,9 +14,9 @@ Item {
   property real iconSize: Style.font.icon
   property bool crossed: false
 
-  // Drifting, while the radio gate runs. A parachute already implies descent,
-  // so it sways and sinks rather than spinning: the wait is 15-60s and a
-  // spinner that long reads as a hang, where drift reads as travel.
+  // Drifting, while the radio gate runs. It sways and sinks rather than
+  // spinning: the wait is 15-60s and a spinner that long reads as a hang,
+  // where drift reads as travel.
   property bool drifting: false
 
   implicitWidth: iconSize
@@ -30,21 +30,26 @@ Item {
 
     // verticalCenterOffset, not y: the item is anchored with centerIn, and an
     // animation on y silently loses to the anchor. Two loops of different
-    // length, so they never resolve together and it reads as drift.
+    // length, so they never resolve together and it reads as drift. Each loop
+    // ends back at rest, because alwaysRunToEnd finishes the loop in progress
+    // when drifting stops: a loop ending at its far swing left the icon
+    // tilted in the panel for as long as it stayed open.
     SequentialAnimation on anchors.verticalCenterOffset {
       running: root.drifting
       loops: Animation.Infinite
       alwaysRunToEnd: true
-      NumberAnimation { to: 1.6; duration: 1500; easing.type: Easing.InOutSine }
+      NumberAnimation { to: 1.6; duration: 750; easing.type: Easing.OutSine }
       NumberAnimation { to: -1.6; duration: 1500; easing.type: Easing.InOutSine }
+      NumberAnimation { to: 0; duration: 750; easing.type: Easing.InSine }
     }
 
     SequentialAnimation on rotation {
       running: root.drifting
       loops: Animation.Infinite
       alwaysRunToEnd: true
-      NumberAnimation { to: 4; duration: 1900; easing.type: Easing.InOutSine }
+      NumberAnimation { to: 4; duration: 950; easing.type: Easing.OutSine }
       NumberAnimation { to: -4; duration: 1900; easing.type: Easing.InOutSine }
+      NumberAnimation { to: 0; duration: 950; easing.type: Easing.InSine }
     }
 
     Shape {
@@ -52,15 +57,19 @@ Item {
 
       ShapePath {
         strokeColor: root.color
+        fillColor: root.color
+        strokeWidth: 1.7
+        joinStyle: ShapePath.RoundJoin
+        PathSvg { path: "M1.5 3.5h21L12 13.5z" }
+      }
+
+      ShapePath {
+        strokeColor: root.color
         fillColor: "transparent"
         strokeWidth: 1.7
         capStyle: ShapePath.RoundCap
         joinStyle: ShapePath.RoundJoin
-        PathSvg { path: "M3.2 11a8.8 8.8 0 0 1 17.6 0" }
-        PathSvg { path: "M3.2 11h17.6" }
-        PathSvg { path: "M3.2 11 9 16" }
-        PathSvg { path: "M20.8 11 15 16" }
-        PathSvg { path: "M9 16h6v6h-6z" }
+        PathSvg { path: "M8 16h8v5.5H8z" }
       }
 
       // Struck through while the radio support is missing. Kept as its own

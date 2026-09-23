@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 import sys
@@ -34,7 +35,7 @@ DECLINED = (
 )
 
 
-class SendCommandTests(unittest.TestCase):
+class SenderFixture(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -55,6 +56,7 @@ class SendCommandTests(unittest.TestCase):
         self.sender = self.command(
             "send-to-peer",
             """#!/bin/sh
+[ "$1" = --help ] && { echo "  -n, --names"; exit 0; }
 out="$CAPTURE"
 [ "$1" = --list ] && out="$CAPTURE_LIST"
 : > "$out"
@@ -117,6 +119,8 @@ exec {sys.executable} "$@"
     def sender_args(self):
         return self.capture.read_text().splitlines()
 
+
+class SendCommandTests(SenderFixture):
     def test_send_names_this_computer_the_way_receiving_does(self):
         result = self.run_omdrop("send", str(self.file))
 
@@ -242,6 +246,89 @@ exec {sys.executable} "$@"
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("omdrop install-driver", result.stderr)
+
+    def test_peers_json_gives_the_panel_names_only_where_a_device_answered(self):
+        self.env["PEER_LIST"] = "\n".join([
+            "22:8b:38:31:89:4e   -34 dBm  [fe80::208b:38ff:fe31:894e%awdl0]:8770  hume",
+            "b2:c4:98:5e:e6:be     ? dBm  [fe80::b0c4:98ff:fe5e:e6be%awdl0]:8770  (no response)",
+            "f2:f2:ee:c4:5a:f7     ? dBm  [fe80::f0f2:eeff:fec4:5af7%awdl0]:8770  Brent's iPhone",
+        ])
+
+        result = self.run_omdrop("peers", "--json", "-n")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), [
+            {"mac": "22:8b:38:31:89:4e", "rssi": -34, "name": "hume"},
+            {"mac": "b2:c4:98:5e:e6:be", "rssi": None, "name": None},
+            {"mac": "f2:f2:ee:c4:5a:f7", "rssi": None, "name": "Brent's iPhone"},
+        ])
+
+    def test_peers_json_draws_an_empty_room_as_an_empty_list(self):
+        self.env["PEER_LIST"] = ""
+
+        result = self.run_omdrop("peers", "--json")
+
+        self.assertEqual(json.loads(result.stdout), [])
+
+
+class SendPickTests(SenderFixture):
+    """`send --pick`: where the chooser opens, and what it remembers."""
+
+    def setUp(self):
+        super().setUp()
+        root = Path(self.tmp.name)
+        self.downloads = root / "Downloads"
+        self.downloads.mkdir()
+        (root / "config" / "airdrop" / "config.toml").write_text(
+            f'name = "Study Mac"\ndownload_dir = "{self.downloads}"\n')
+        self.opened_at = root / "opened-at"
+        # Stands in for the chooser: notes where it was asked to open, and
+        # answers with PICK_ANSWER, or cancels when that is empty.
+        picker = self.command("picker", """#!/bin/sh
+printf '%s\\n' "$2" > "$OPENED_AT"
+[ -n "$PICK_ANSWER" ] || exit 1
+printf '%s\\n' "$PICK_ANSWER"
+""")
+        self.env.update(OMDROP_PICKER=str(picker), OPENED_AT=str(self.opened_at))
+
+    def pick_and_send(self, answer):
+        self.env["PICK_ANSWER"] = str(answer)
+        return self.run_omdrop("send", "--pick", "--to", "6c:58")
+
+    def test_the_chooser_opens_where_the_last_file_was_sent_from(self):
+        photos = Path(self.tmp.name) / "Photos"
+        photos.mkdir()
+        (photos / "cat.jpg").write_bytes(b"x")
+
+        first = self.pick_and_send(photos / "cat.jpg")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(self.opened_at.read_text().strip(), str(self.downloads))
+        self.assertEqual(self.capture.read_text().splitlines()[-1], str(photos / "cat.jpg"))
+
+        self.pick_and_send(photos / "cat.jpg")
+        self.assertEqual(self.opened_at.read_text().strip(), str(photos))
+
+        # A remembered folder that has gone is forgotten, not opened.
+        (photos / "cat.jpg").unlink()
+        photos.rmdir()
+        self.pick_and_send(self.file)
+        self.assertEqual(self.opened_at.read_text().strip(), str(self.downloads))
+
+    def test_a_cancelled_chooser_sends_nothing_and_says_nothing(self):
+        self.env["PICK_ANSWER"] = ""
+
+        result = self.run_omdrop("send", "--pick", "--to", "6c:58")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stderr, "")
+        self.assertFalse(self.capture.exists())
+
+
+class SoundSettingTests(SenderFixture):
+    def test_muting_the_radar_is_remembered(self):
+        self.run_omdrop("sound", "off")
+
+        self.assertEqual(self.run_omdrop("sound").stdout.strip(), "off")
 
 
 if __name__ == "__main__":

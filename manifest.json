@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "netmojo.omdrop",
   "name": "Omdrop - AirDrop for Omarchy-Mac",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "author": "Brent Kearney",
   "license": "MIT",
   "description": "Send and receive files with nearby Apple devices over AirDrop, on Apple Silicon Macs running Omarchy.",
@@ -14,7 +14,7 @@
   },
   "barWidget": {
     "displayName": "omdrop",
-    "description": "Become visible to nearby Apple devices for a bounded window and receive what they send.",
+    "description": "Become visible to nearby Apple devices for a bounded window, receive what they send, and send them files from a radar of who is nearby.",
     "category": "Network",
     "allowMultiple": false,
     "defaultSection": "right",

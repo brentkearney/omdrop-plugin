@@ -7,7 +7,7 @@ import qs.Ui
 
 // omdrop -- receive files from nearby Apple devices.
 //
-// This panel owns no state. `bin/omdrop` is the single source of truth: it
+// This panel owns no settings. `bin/omdrop` is the single source of truth: it
 // asks systemd whether the receiver is up and asks the radio side whether
 // anyone can actually see us, and answers in one JSON line. We poll it while
 // the panel is open and while the bar icon is lit, so the widget stays right
@@ -280,7 +280,7 @@ Panel {
     }
     onExited: function(code) {
       if (code === 0) root.lastError = ""
-      statusProc.running = true
+      root.refreshStatus()
     }
   }
 
@@ -296,15 +296,14 @@ Panel {
     onExited: function(code) {
       root.busy = false
       if (code === 0) root.lastError = ""
-      statusProc.running = true
+      root.refreshStatus()
     }
   }
 
-  // Both of these are validated by the receiver, not here: it refuses to start
-  // on a bad value, and the CLI puts the old one back if that happens. A
-  // failure therefore shows up as the field snapping back on the next poll.
-  Process { id: setNameProc; onExited: statusProc.running = true }
-  Process { id: setDirProc;  onExited: statusProc.running = true }
+  // The name is validated by the receiver, not here: it refuses to start on a
+  // bad value, and the CLI puts the old one back if that happens. A failure
+  // therefore shows up as the field snapping back on the next poll.
+  Process { id: setNameProc; onExited: root.refreshStatus() }
 
   function setDeviceName(v) {
     if (v === "" || v === root.deviceName) return
@@ -312,10 +311,221 @@ Panel {
     setNameProc.running = true
   }
 
-  function setDownloadDir(v) {
-    if (v === "" || v === root.downloadDir) return
-    setDirProc.command = [root.cli, "dir", v]
-    setDirProc.running = true
+  // The download folder is chosen in Nautilus, not typed: a path typed into a
+  // field is a path somebody has to get exactly right, and the chooser can
+  // only answer with one that exists. The CLI owns the whole exchange --
+  // opening the chooser where the folder is now, and applying the answer --
+  // so a cancel is just an exit with nothing to say.
+  property bool pickingDir: false
+  Process {
+    id: pickDirProc
+    command: [root.cli, "dir", "--pick"]
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: if (text.trim() !== "") root.lastError = text.trim()
+    }
+    onExited: { root.pickingDir = false; root.refreshStatus() }
+  }
+
+  function pickDownloadDir() {
+    if (pickingDir) return
+    pickingDir = true
+    lastError = ""
+    pickDirProc.running = true
+  }
+
+  // ---------------------------------------------------------------- radar
+  //
+  // Two listings run while the radar is open. The bare one is passive and
+  // quick, so it is polled for the dots and their signal. The named one
+  // connects to every peer and takes half a minute, so it runs back to back:
+  // each lookup starts when the last one ends, and the names it finds are
+  // kept for the rest of the session, since a device answers only while its
+  // AirDrop is listening and would otherwise lose its label between lookups.
+  property bool radarOpen: false
+  property bool soundOn: true
+  property var peers: []            // [{mac, rssi, name}] -- the last listing, names merged in
+  property var peerNames: ({})      // mac -> name, everything learnt this session
+  property string latestPeer: ""    // "hume 22:8b:38:31:89:4e", the newest name learnt
+  readonly property bool scanning: radarOpen && root.opened && receiving && visibility === 1
+  // The device a send is going to stays listed until that send is over, even
+  // if a poll stops hearing it mid-transfer: its row is where the progress is.
+  readonly property var namedPeers: {
+    var list = peers.filter(function(p) { return p.name !== "" })
+    if (sendingTo !== "" && sendingName !== ""
+        && !list.some(function(p) { return p.mac === sendingTo }))
+      list.push({ mac: sendingTo, rssi: null, name: sendingName })
+    return list
+  }
+
+  function mergePeers(list) {
+    var out = []
+    for (var i = 0; i < list.length; i++) {
+      var p = list[i]
+      out.push({ mac: p.mac, rssi: p.rssi, name: p.name || peerNames[p.mac] || "" })
+    }
+    peers = out
+  }
+
+  function learnNames(list) {
+    var known = Object.assign({}, peerNames), fresh = ""
+    for (var i = 0; i < list.length; i++) {
+      var p = list[i]
+      if (!p.name || known[p.mac] === p.name) continue
+      known[p.mac] = p.name
+      fresh = p.name + " " + p.mac
+    }
+    peerNames = known
+    if (fresh !== "") latestPeer = fresh
+    mergePeers(peers)
+  }
+
+  function openRadar() {
+    radarOpen = !radarOpen
+    // Scanning is what a window does, so opening the radar on a machine that
+    // is off opens one, for as long as the slider says.
+    if (radarOpen && usable && !receiving && !busy) toggleOmdrop()
+  }
+
+  Process {
+    id: peersProc
+    command: [root.cli, "peers", "--json"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try { root.mergePeers(JSON.parse(text)) } catch (e) {}
+      }
+    }
+  }
+
+  Timer {
+    interval: 2000
+    repeat: true
+    running: root.scanning
+    triggeredOnStart: true
+    onTriggered: if (!peersProc.running) peersProc.running = true
+  }
+
+  Process {
+    id: namesProc
+    command: [root.cli, "peers", "--json", "-n"]
+    property double startedAt: 0
+    onStarted: startedAt = Date.now()
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try { root.learnNames(JSON.parse(text)) } catch (e) {}
+      }
+    }
+    // A lookup that fails at once (no sender, the radio just went) would
+    // otherwise restart in a tight loop, so a quick exit waits before the next.
+    onExited: namesAgain.interval = Date.now() - startedAt < 5000 ? 10000 : 250
+  }
+
+  Timer {
+    id: namesAgain
+    interval: 250
+    repeat: true
+    running: root.scanning && !namesProc.running
+    triggeredOnStart: true
+    onTriggered: if (!namesProc.running) namesProc.running = true
+  }
+
+  // A radar that has been closed should not keep broadcasting.
+  onScanningChanged: if (!scanning && namesProc.running) namesProc.signal(15)
+
+  Process { id: soundProc; onExited: root.refreshStatus() }
+  function toggleSound() {
+    soundOn = !soundOn
+    soundProc.command = [root.cli, "sound", soundOn ? "on" : "off"]
+    soundProc.running = true
+  }
+
+  // ---------------------------------------------------------------- sending
+  //
+  // One send at a time, owned by the panel so it survives the popup closing
+  // while the chooser has focus. The CLI opens the chooser where the last
+  // file came from, remembers the folder, and narrates the transfer one line
+  // at a time; the newest line is the row's status.
+  //
+  // The chooser takes the keyboard, and the panel closes when it loses it. So
+  // the panel reopens as soon as the chooser answers -- with a file, to show
+  // the transfer, or with a cancel, to put the person back where they were --
+  // and closes on its own only after a file has arrived. A failure stays on
+  // the row until the next attempt, so it can be read and retried.
+  property string sendingTo: ""
+  property string sendingName: ""
+  property string sendStatus: ""
+  property bool sendChosen: false    // the chooser answered with a file
+  property bool sendFailed: false
+  property bool sendDone: false
+  readonly property bool sendActive: sendProc.running && sendChosen
+
+  function sendTo(mac) {
+    if (sendProc.running) return
+    var named = peers.filter(function(p) { return p.mac === mac })
+    sendingTo = mac
+    sendingName = named.length ? named[0].name : ""
+    sendStatus = "Choose a file…"
+    sendChosen = false
+    sendFailed = false
+    sendDone = false
+    sendClose.stop()
+    sendProc.command = [root.cli, "send", "--pick", "--to", mac]
+    sendProc.running = true
+  }
+
+  Process {
+    id: sendProc
+    stdout: SplitParser {
+      onRead: function(line) {
+        if (line.trim() === "") return
+        if (!root.sendChosen) { root.sendChosen = true; root.open() }
+        root.sendStatus = line.trim()
+      }
+    }
+    // Line by line, like stdout: the sender says "waiting up to 30s…" while
+    // it waits for the device, which is progress worth seeing, and its last
+    // line is the reason a failure failed. Keeping only the first line showed
+    // the wait as if it were the outcome.
+    stderr: SplitParser {
+      onRead: function(line) { if (line.trim() !== "") root.sendStatus = line.trim() }
+    }
+    onExited: function(code) {
+      root.open()
+      // A cancelled chooser is exit 1 with nothing said: no send, no message.
+      if (code !== 0 && !root.sendChosen && root.sendStatus === "Choose a file…") {
+        root.sendingTo = ""
+        return
+      }
+      root.sendFailed = code !== 0
+      root.sendDone = code === 0
+      if (root.sendDone) sendClose.restart()
+    }
+  }
+
+  // Long enough to read "Sent photo.jpg", then out of the way.
+  Timer {
+    id: sendClose
+    interval: 1800
+    onTriggered: {
+      root.sendingTo = ""
+      root.sendStatus = ""
+      root.sendDone = false
+      root.close()
+    }
+  }
+
+  // Every change asks for a fresh status, and a request that arrives while a
+  // poll is already running is queued, not dropped. Setting `running` on a
+  // Process that is already running does nothing, so a poll that began before
+  // the change finished after it and painted the old download folder back,
+  // until the next timed poll up to ten seconds later. The in-flight answer
+  // predates the change, so it is discarded rather than shown.
+  property bool statusStale: false
+  function refreshStatus() {
+    if (statusProc.running) statusStale = true
+    else statusProc.running = true
   }
 
   Process {
@@ -323,9 +533,16 @@ Panel {
     command: [root.cli, "status", "--json"]
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.applyStatus(text)
+      onStreamFinished: if (!root.statusStale) root.applyStatus(text)
     }
-    onExited: function(code) { if (code !== 0) root.installed = false }
+    onExited: function(code) {
+      if (root.statusStale) {
+        root.statusStale = false
+        statusProc.running = true
+        return
+      }
+      if (code !== 0) root.installed = false
+    }
   }
 
   // "Not available" is the entire first-run experience for anyone who installs
@@ -364,7 +581,7 @@ Panel {
   Process {
     id: installDriverProc
     command: [root.cli, "install-driver"]
-    onExited: { root.doctorText = ""; statusProc.running = true }
+    onExited: { root.doctorText = ""; root.refreshStatus() }
   }
 
   function applyStatus(text) {
@@ -378,8 +595,8 @@ Panel {
       downloadDir = s.dir || ""
       blockedReason = s.reason || ""
       syncWindowToRunning(s.mode || "off")
+      if (!soundProc.running) soundOn = s.sound !== false
       if (!nameField.activeFocus) nameField.text = deviceName
-      if (!dirField.activeFocus) dirField.text = tildify(downloadDir)
       // Asked once per transition into unusable, not on every poll.
       if (!usable && doctorText === "" && !doctorProc.running) doctorProc.running = true
       if (usable) { doctorText = ""; driverInstallable = false }
@@ -407,7 +624,7 @@ Panel {
         root.remaining = -1
         root.receiving = false
         root.visibility = 0
-        statusProc.running = true
+        root.refreshStatus()
       }
     }
   }
@@ -420,12 +637,13 @@ Panel {
     repeat: true
     running: true
     triggeredOnStart: true
-    onTriggered: statusProc.running = true
+    // A timed poll changes nothing, so one already in flight answers it.
+    onTriggered: if (!statusProc.running) statusProc.running = true
   }
 
   // Opening the panel should show the truth immediately, not up to ten
   // seconds of whatever was true when it was last closed.
-  onOpenedChanged: if (opened && !busy) statusProc.running = true
+  onOpenedChanged: if (opened && !busy) root.refreshStatus()
 
   IpcHandler {
     target: root.ipcTarget
@@ -469,7 +687,10 @@ Panel {
       anchors.fill: parent
       onCloseRequested: root.controller.hide()
       onActivateRequested: root.toggleOmdrop()
-      onTextKey: function(t) { if (t === "d" || t === "D") root.toggleOmdrop() }
+      onTextKey: function(t) {
+        if (t === "d" || t === "D") root.toggleOmdrop()
+        else if (t === "n" || t === "N") root.openRadar()
+      }
 
       Column {
         id: column
@@ -619,6 +840,116 @@ Panel {
 
         PanelSeparator { visible: root.usable; foreground: root.foreground }
 
+        // Sending. A header that opens downwards onto the radar, the
+        // newest name it has learnt, and the devices that can be sent to.
+        Item {
+          visible: root.usable
+          width: parent.width
+          implicitHeight: nearbyHeader.implicitHeight + Style.space(4)
+
+          PanelSectionHeader {
+            id: nearbyHeader
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            text: "SEND TO PEERS"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+          }
+
+          Text {
+            anchors.right: chevron.left
+            anchors.rightMargin: Style.space(8)
+            anchors.verticalCenter: parent.verticalCenter
+            visible: !root.radarOpen && root.namedPeers.length > 0
+            text: root.namedPeers.length + (root.namedPeers.length === 1 ? " device" : " devices")
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          Text {
+            id: chevron
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            text: "\uf078"
+            rotation: root.radarOpen ? 180 : 0
+            color: nearbyMouse.containsMouse ? root.foreground : root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            Behavior on rotation { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
+          }
+
+          MouseArea {
+            id: nearbyMouse
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: root.openRadar()
+          }
+        }
+
+        Item {
+          id: radarDrawer
+          visible: root.usable && height > 0
+          width: parent.width
+          height: root.radarOpen ? radarColumn.implicitHeight : 0
+          clip: true
+          Behavior on height { NumberAnimation { duration: 260; easing.type: Easing.OutCubic } }
+
+          Column {
+            id: radarColumn
+            width: parent.width
+            spacing: Style.space(10)
+
+            // The newest device to give its name, or what the radar is doing
+            // until one has.
+            Text {
+              width: parent.width
+              horizontalAlignment: Text.AlignHCenter
+              textFormat: Text.PlainText
+              text: root.latestPeer !== "" ? root.latestPeer
+                  : !root.receiving ? "Turning Omdrop on to listen" + root.busyDots
+                  : root.scanning ? "Listening for nearby devices" + root.busyDots
+                  : "Waiting for the radio" + root.busyDots
+              color: root.latestPeer !== "" ? root.foreground : root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              font.bold: root.latestPeer !== ""
+              elide: Text.ElideRight
+            }
+
+            Radar {
+              anchors.horizontalCenter: parent.horizontalCenter
+              width: Math.min(parent.width, Style.space(220))
+              peers: root.peers
+              scanning: root.scanning
+              muted: !root.soundOn
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              soundDir: Qt.resolvedUrl("share/sounds").toString().replace("file://", "")
+              onMuteToggled: root.toggleSound()
+              onPeerClicked: function(mac) { root.sendTo(mac) }
+            }
+
+            PanelSeparator {
+              visible: root.namedPeers.length > 0
+              width: parent.width
+              foreground: root.foreground
+            }
+
+            Repeater {
+              model: root.namedPeers
+              delegate: PeerRow {
+                required property var modelData
+                width: radarColumn.width
+                peer: modelData
+              }
+            }
+          }
+        }
+
+        PanelSeparator { visible: root.usable; foreground: root.foreground }
+
         Column {
           visible: root.usable
           width: parent.width
@@ -653,16 +984,134 @@ Panel {
             fontFamily: root.fontFamily
           }
 
-          TextField {
-            id: dirField
+          // The folder, shown as a button that opens it in the chooser.
+          Button {
             width: parent.width
+            leftAlign: true
+            bordered: true
             foreground: root.foreground
-            text: root.tildify(root.downloadDir)
-            onActiveFocusChanged: if (!activeFocus) text = root.tildify(root.downloadDir)
-            onAccepted: root.setDownloadDir(text)
+            fontFamily: root.fontFamily
+            fontSize: Style.font.bodySmall
+            iconText: "\uf07c"
+            text: root.pickingDir ? "Choosing in Files…" : root.tildify(root.downloadDir)
+            tooltipText: "Choose another folder"
+            onClicked: root.pickDownloadDir()
           }
         }
       }
+    }
+  }
+
+  // A device that can be sent to: its name, its address, and the progress of
+  // a send while one is going to it. Clicking it opens the chooser.
+  component PeerRow: CursorSurface {
+    id: row
+    required property var peer
+    readonly property bool target: root.sendingTo === peer.mac
+
+    foreground: root.foreground
+    implicitHeight: rowText.implicitHeight + Style.spacing.rowPaddingX
+
+    Column {
+      id: rowText
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.leftMargin: Style.spacing.controlPaddingX
+      anchors.rightMargin: Style.spacing.controlPaddingX
+      anchors.verticalCenter: parent.verticalCenter
+      spacing: Style.space(2)
+
+      Item {
+        width: parent.width
+        implicitHeight: nameText.implicitHeight
+
+        Text {
+          id: nameText
+          anchors.left: parent.left
+          anchors.right: macText.left
+          anchors.rightMargin: Style.space(8)
+          textFormat: Text.PlainText
+          text: row.peer.name
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+          font.bold: row.target
+          elide: Text.ElideRight
+        }
+
+        Text {
+          id: macText
+          anchors.right: parent.right
+          anchors.verticalCenter: parent.verticalCenter
+          text: row.peer.mac
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+        }
+      }
+
+      Text {
+        width: parent.width
+        visible: row.target && root.sendStatus !== ""
+        textFormat: Text.PlainText
+        text: root.sendStatus
+        color: root.sendFailed ? root.urgent : Qt.darker(root.foreground, 1.3)
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        wrapMode: Text.WordWrap
+      }
+
+      // Progress, honestly: the sender reports stages (asked, accepted, sent)
+      // and no byte counts, so while a transfer runs the bar says "working"
+      // with a sliding segment rather than inventing a percentage. It fills
+      // when the file has arrived.
+      Rectangle {
+        id: track
+        visible: row.target && (root.sendActive || root.sendDone)
+        width: parent.width
+        height: Style.space(3)
+        radius: height / 2
+        color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.15)
+        clip: true
+
+        Rectangle {
+          id: segment
+          visible: root.sendActive
+          height: parent.height
+          radius: parent.radius
+          color: root.foreground
+          width: track.width * 0.3
+
+          NumberAnimation on x {
+            running: segment.visible && track.visible
+            loops: Animation.Infinite
+            from: -segment.width; to: track.width
+            duration: 1100; easing.type: Easing.InOutQuad
+          }
+        }
+
+        Rectangle {
+          visible: root.sendDone
+          anchors.fill: parent
+          radius: parent.radius
+          color: root.foreground
+        }
+      }
+    }
+
+    MouseArea {
+      id: rowMouse
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: sendProc.running ? Qt.BusyCursor : Qt.PointingHandCursor
+      onContainsMouseChanged: row.hasCursor = containsMouse
+      onClicked: root.sendTo(row.peer.mac)
+    }
+
+    PanelToolTip {
+      visible: rowMouse.containsMouse && !sendProc.running
+      text: "Send a file to " + row.peer.name
+      fontFamily: root.fontFamily
     }
   }
 }

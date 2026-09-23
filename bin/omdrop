@@ -12,8 +12,8 @@
 # This command owns the receive-window duration and receiver configuration
 # that do not belong in the panel.
 #
-# The panel's parachute button is a toggle and nothing more (design:
-# design/airdrop/). It shells out to `omdrop toggle` and reads
+# The panel holds no state of its own. It shells out to this command for every
+# action (toggle, peers --json, send --pick, dir --pick, sound) and reads
 # `omdrop status --json`; everything with an argument lives here.
 #
 # This wraps what already exists rather than inventing state:
@@ -54,7 +54,7 @@ PROJ="$(cd "$(dirname "$SELF")/.." && pwd)"
 # A fallback that silently substitutes for the real value is the same class of
 # defect as a status line reporting a state that was never entered, so this one
 # says when it is guessing, and says when the two disagree.
-VERSION_FALLBACK=0.6.1
+VERSION_FALLBACK=0.7.0
 omdrop_version() {
   local dir manifest version= real
   real=$(readlink -f "$0" 2>/dev/null) || real="$0"
@@ -162,16 +162,18 @@ omdrop -- send and receive files with nearby Apple devices
                     first (omdrop on): that is what hears the devices around
                     you. --to ADDRESS chooses one when several are heard, and
                     --wait SECONDS keeps trying for that long while an
-                    iPhone's receiver is asleep (default 30).
+                    iPhone's receiver is asleep (default 30). --pick asks
+                    for the file in a chooser instead.
   peers [-n]        the Apple devices nearby right now. -n also asks
                     each one for its name, which means connecting to it and
                     showing this machine to every device listed, and briefly
                     announcing this Apple ID over Bluetooth so a "Contacts
                     Only" device will answer at all. --no-wake skips the
                     announcement; names then come only from devices that are
-                    already listening
+                    already listening. --json prints one JSON array
   name [NEW]        show the name, or set it (restarts a running receiver)
-  dir [PATH]        show the download folder, or set it
+  dir [PATH|--pick] show the download folder, or set it (--pick: in a chooser)
+  sound [on|off]    the panel's radar sound effects
   limit [PERCENT]   show the maximum transfer size, or set it to 1-90% of
                     currently free space (default 30%)
   visibility [MODE]  show, or set to "everyone" (default) or "contacts".
@@ -898,7 +900,8 @@ cmd_status() {
 
   if (( json )); then
     ON="$on" LEFT="$left" VIS="$vis" MODE="$mode" DIR="$(effective_dir)" \
-    REASON="$reason" RXPROVEN="$rxproven" NAME="$(effective_name)" python3 -c '
+    REASON="$reason" RXPROVEN="$rxproven" NAME="$(effective_name)" \
+    SOUND="$(sound_on && echo 1)" python3 -c '
 import json, os
 left, vis = os.environ["LEFT"], os.environ["VIS"]
 print(json.dumps({
@@ -912,6 +915,7 @@ print(json.dumps({
     "mode": os.environ["MODE"],
     "reason": os.environ["REASON"] or None,
     "rx_proven": os.environ["RXPROVEN"] == "1",
+    "sound": os.environ["SOUND"] == "1",
 }))'
     return
   fi
@@ -1075,7 +1079,7 @@ $(printf '%s\n' "$listing" | sed 's/^/  /')"
 }
 
 cmd_send() {
-  local file= to= wait=$DEFAULT_SEND_WAIT verbose=0 rc; local -a rest=()
+  local file= to= wait=$DEFAULT_SEND_WAIT verbose=0 pick=0 rc; local -a rest=()
   while (( $# )); do
     case "$1" in
       --to)     shift; (( $# )) || die "send --to: the address of a device, as listed by: omdrop peers"; to=$1 ;;
@@ -1083,6 +1087,10 @@ cmd_send() {
       --wait)   shift; (( $# )) || die "send --wait: a number of seconds"; wait=$1 ;;
       --wait=*) wait=${1#--wait=} ;;
       -v|--verbose) verbose=1 ;;
+      # The panel's route: ask for the file in a chooser, after everything
+      # that could refuse the send has been checked, so nobody picks a file
+      # only to be told the radio is off.
+      --pick)   pick=1 ;;
       # A filename may begin with a dash, and the person holding it should not
       # have to know that; `--` is how they say so.
       --)       shift; break ;;
@@ -1106,6 +1114,18 @@ cmd_send() {
        fi ;;
     *) die "send: one file and one recipient, but ${#rest[@]} were named" ;;
   esac
+
+  if (( pick )); then
+    (( ${#rest[@]} == 0 )) || die "send --pick: the chooser picks the file, so name only the recipient, with --to"
+    require_sender
+    file=$(pick file "$(send_start_dir)" "Send to ${to:-a nearby device}") || exit $?
+    # Remembered on choosing, not on arriving: the folder is where they
+    # keep things to send, whether or not this one got through.
+    setting_set send_from "$(dirname "$file")"
+    # The first line the panel hears: the chooser has closed with a file, so
+    # the panel can come back and show this send's progress.
+    printf 'Preparing %s...\n' "$(basename "$file")"
+  fi
 
   [[ -n "$file" ]] || die "usage: omdrop send [RECIPIENT] FILE [--wait SECONDS]
   RECIPIENT is a device name, as shown by \`omdrop peers -n\`, or part of an address."
@@ -1211,12 +1231,13 @@ cmd_peers() {
   # AirDrop server shut until it recognizes one -- without it, names resolve
   # only from devices something else has woken. --no-wake asks for the lookup
   # without that broadcast.
-  local names=() wake=()
+  local names=() wake=() json=0
   while (( $# )); do
     case "$1" in
       -n|--names) names=(--names); shift ;;
       --no-wake) wake=(--no-wake); shift ;;
-      *) die "usage: omdrop peers [-n|--names] [--no-wake]" ;;
+      --json) json=1; shift ;;
+      *) die "usage: omdrop peers [-n|--names] [--no-wake] [--json]" ;;
     esac
   done
   require_sender
@@ -1237,11 +1258,21 @@ cmd_peers() {
   # usually killed by that server's own restart and retried. Measured 15.5-17.6
   # s per call on 2026-09-21. Silence that long reads as a hang. A bare listing
   # transmits nothing and returns at once, so it gets no animation.
-  if (( ${#names[@]} )); then
+  # The panel asks for JSON and draws its own progress, so it gets no spinner
+  # (and has no terminal for one anyway).
+  if (( ${#names[@]} && ! json )); then
     out=$(spinner_while "Asking nearby devices for their names" \
             "$SENDER" --list "${names[@]}" "${wake[@]}"); rc=$?
   else
-    out=$("$SENDER" --list); rc=$?
+    out=$("$SENDER" --list "${names[@]}" "${wake[@]}"); rc=$?
+  fi
+  if (( json )); then
+    # An empty room is still an answer the panel can draw: `[]` on stdout, and
+    # the same exit status and sentence as the text form on stderr.
+    if (( rc == 1 )); then printf '[]\n'
+    elif (( rc == 0 )); then printf '%s\n' "$out" | peers_json; return
+    else die "$out"
+    fi
   fi
   if (( rc == 1 )); then
     # The RADIO, not the receiver: the receiver can be up with no window open,
@@ -1256,6 +1287,28 @@ cmd_peers() {
   fi
   printf '%s\n' "$out"
   return "$rc"
+}
+
+# The sender's listing as one JSON array, for the panel. Same pattern as
+# choose_peer: address, signal (or `?`), endpoint, then a name column that -n
+# fills. The placeholders a lookup prints for a peer that did not answer are
+# not names, so they become null rather than labels on the radar.
+peers_json() {
+  python3 -c '
+import json, re, sys
+row = re.compile(r"^((?:[0-9a-f]{2}:){5}[0-9a-f]{2})\s+(-?\d+|\?) dBm\s+\S+\s*(.*)$")
+peers = []
+for line in sys.stdin:
+    m = row.match(line.rstrip("\n"))
+    if not m:
+        continue
+    name = m.group(3).strip()
+    peers.append({
+        "mac": m.group(1),
+        "rssi": None if m.group(2) == "?" else int(m.group(2)),
+        "name": None if name in ("", "(no response)", "(anonymous)") else name,
+    })
+print(json.dumps(peers))'
 }
 
 # The unit is hardened with ProtectHome=read-only, so the download folder has
@@ -1421,12 +1474,28 @@ cmd_handle() {
   act_notify "$f"
 }
 
+# Nautilus's chooser, or the desktop portal's where Nautilus is absent. Prints
+# the chosen path; a cancel is exit 1 with nothing said, because closing the
+# chooser is an answer, not an error. OMDROP_PICKER stands in for it the way
+# OMDROP_SENDER does for the sender.
+pick() {
+  if [[ -n "${OMDROP_PICKER:-}" ]]; then "$OMDROP_PICKER" "$@"
+  else python3 "$PROJ/bin/pick.py" "$@"
+  fi
+}
+
 cmd_dir() {
   if (( $# == 0 )); then
     printf '%s\n' "$(effective_dir)"
     return
   fi
-  local want=${1/#\~/$HOME} new
+  local want
+  if [[ "$1" == --pick ]]; then
+    want=$(pick folder "$(effective_dir)" "Save received files to") || exit $?
+  else
+    want=${1/#\~/$HOME}
+  fi
+  local new
   [[ -d "$want" ]] || die "$want: not a directory (create it first)"
   new=$(readlink -f "$want")
   [[ -O "$new" ]] || die "$new: you do not own it; received files land here as you"
@@ -1454,6 +1523,25 @@ systemctl --user status $UNIT"
     fi
   fi
   printf 'Files will land in %s\n' "$new"
+}
+
+# The radar's sound effects. Off is remembered, so the panel is quiet from the
+# first frame next time rather than pinging once before it reads the setting.
+sound_on() { [[ "$(setting_get sound)" != off ]]; }
+
+cmd_sound() {
+  case "${1:-}" in
+    "")  sound_on && echo on || echo off ;;
+    on|off) setting_set sound "$1" ;;
+    *) die "usage: omdrop sound [on|off]" ;;
+  esac
+}
+
+# Where the file chooser opens for a send: the folder the last sent file came
+# from, while it still exists, and the download folder otherwise.
+send_start_dir() {
+  local d; d=$(setting_get send_from)
+  [[ -n "$d" && -d "$d" ]] && printf '%s\n' "$d" || effective_dir
 }
 
 # Contacts Only. The receiver reads these two files directly (see bin/contacts.py):
@@ -1579,6 +1667,7 @@ case "${1:-status}" in
   peers|list) shift; cmd_peers "$@" ;;
   name)   shift; cmd_name "$@" ;;
   dir)    shift; cmd_dir "$@" ;;
+  sound)  shift; cmd_sound "$@" ;;
   limit)  shift; cmd_limit "$@" ;;
   visibility|vis|viz) shift; cmd_visibility "$@" ;;
   senders) shift; cmd_senders "$@" ;;

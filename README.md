@@ -63,12 +63,12 @@ pacman -R brcmfmac-awdl-dkms
 
 ### Receiving
 
-Click the parachute icon to open the panel. Inside:
+Click the Omdrop icon (a triangle dropping into a box) to open the panel. Inside:
 
 - **The switch** turns receiving on and off. Right-clicking the bar icon does the same without opening the panel.
 - **Stay visible for** sets how long receiving mode lasts, from one file to always on.
 - **They see you as** sets the name of your device as others see it. Defaults to this machine's short hostname.
-- **Save files to** sets the download folder. Defaults to `~/Downloads`.
+- **Save files to** shows the download folder, which defaults to `~/Downloads`. Click it to choose another folder in Files (Nautilus). Where Nautilus isn't installed, the desktop's own file chooser opens instead.
 
 A file that arrives is saved there, copied to the clipboard, and announced in a notification. Click the notification to open it in whatever application handles that file type. Nothing opens on its own.
 
@@ -137,7 +137,14 @@ percentage would allow a larger transfer.
 
 ### Sending
 
-Sending is a command: the toolbar menu has no send button yet. Turn a window on first. That is what hears the devices around you, and what fills the peer table `send` chooses from.
+Open the panel and expand **Send to peers** (or press `n`). If Omdrop is off, expanding it turns Omdrop on for the time the slider shows, because a receive window is what hears the devices around you.
+
+- **The radar** draws each nearby device as a dot. A brighter dot, closer to the centre, means a stronger signal. It does not show a direction or a distance.
+- **Names** appear beside the dots as devices answer. The newest one is shown above the radar, and every named device is listed below it. While the section is open, the panel asks for names continuously. That means connecting to each device and briefly announcing this Apple ID over Bluetooth (see `peers -n` below), and it stops when you close the section.
+- **Sending**: click a name in the list, or a labelled dot, and choose a file. The chooser opens in the folder you last sent from, or in the download folder the first time and whenever that folder is gone. The row shows the send's progress.
+- **Sound**: each named device pings as the sweep passes its dot, higher and louder for a stronger signal, and blips when its name first appears. Unnamed dots stay silent. The speaker in the radar's bottom-right corner mutes it, and the setting is remembered (`omdrop sound on|off`).
+
+The command line does the same. Turn a window on first:
 
 ```bash
 omdrop on                                       # turn on omdrop, so devices are seen
@@ -180,7 +187,6 @@ The UFW exception belongs to the receiver, not the driver package. Omdrop runs `
 If you encounter a bug, or have a feature request, [create an Issue](https://github.com/brentkearney/omdrop-plugin/issues) here. Or better yet, have your agent fix or implement it, and [create a Pull Request](https://github.com/brentkearney/omdrop-plugin/pulls). I'm happy to review and merge.
 
 #### Known Bugs / Limitations
-- No send button in the toolbar menu. Sending works from the command line, as [Sending](#sending) describes. PRs welcome, here for the menu or in [omdrop-awdl](https://github.com/brentkearney/omdrop-awdl/) for the sender.
 - One file per `omdrop send`. To send several, run it once per file.
 - A refused Contacts Only transfer shows as "Waiting..." on iOS rather than an error, so a refusal can look like a hang on the sending device.
 
