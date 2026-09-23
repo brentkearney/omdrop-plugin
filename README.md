@@ -85,6 +85,8 @@ omdrop dir ~/Drops
 omdrop limit 30      # cap one transfer at 30% of currently free disk space
 ```
 
+`start` and `stop` work in place of `on` and `off`, `list` in place of `peers`, and `vis` or `viz` in place of `visibility`.
+
 #### Contacts Only
 
 By default anyone nearby can send to you. To accept files only from people you
