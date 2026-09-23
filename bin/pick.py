@@ -59,14 +59,23 @@ def path_of(results):
     return unquote(u.path) if u.scheme == "file" else None
 
 
-def focus_when_mapped(title):
-    """Give the chooser the keyboard, on Hyprland.
+def hypr_dispatch(lua, *classic):
+    """One Hyprland dispatch: the Lua config's form first, then the classic one."""
+    out = subprocess.run(["hyprctl", "dispatch", lua], capture_output=True, text=True, timeout=2)
+    if out.stdout.strip() != "ok" and classic:
+        subprocess.run(["hyprctl", "dispatch", *classic], capture_output=True, timeout=2)
 
-    A chooser opened from the panel carries no activation token, so Hyprland
-    maps it without focus: measured 2026-09-23, it opened behind the focused
-    window's input and keystrokes went to whatever had them before. Wait for
-    the window with our title to appear, then focus it. Anywhere else this
-    does nothing, and the compositor's own policy stands.
+
+def present_when_mapped(title):
+    """Put the chooser in front, as a dialog: floating, centred, focused.
+
+    A chooser opened from the panel carries no parent window and no activation
+    token, so Hyprland treats it as an ordinary window: measured 2026-09-23, it
+    tiled beside whatever was open and took no focus, so keystrokes went to the
+    window that had them before. Wait for the window with our title to appear,
+    then float it at a dialog's size, centre it, raise it and focus it, the same
+    dispatches omarchy-hyprland-window-pop uses. Anywhere else this does
+    nothing, and the compositor's own policy stands.
     """
     if not os.environ.get("HYPRLAND_INSTANCE_SIGNATURE") or not shutil.which("hyprctl"):
         return
@@ -77,18 +86,30 @@ def focus_when_mapped(title):
         try:
             clients = json.loads(subprocess.run(["hyprctl", "clients", "-j"], capture_output=True,
                                                 text=True, timeout=2).stdout or "[]")
+            monitor = json.loads(subprocess.run(["hyprctl", "activeworkspace", "-j"], capture_output=True,
+                                                text=True, timeout=2).stdout or "{}")
+            monitors = json.loads(subprocess.run(["hyprctl", "monitors", "-j"], capture_output=True,
+                                                 text=True, timeout=2).stdout or "[]")
         except (OSError, subprocess.SubprocessError, ValueError):
             return GLib.SOURCE_REMOVE
         match = [c for c in clients if c.get("title") == title]
         if not match:
             return GLib.SOURCE_CONTINUE if tries["left"] > 0 else GLib.SOURCE_REMOVE
-        addr = match[0]["address"]
-        # The Lua config's dispatcher first; the classic one for older setups.
-        out = subprocess.run(["hyprctl", "dispatch", f'hl.dsp.focus({{ window = "address:{addr}" }})'],
-                             capture_output=True, text=True, timeout=2).stdout.strip()
-        if out != "ok":
-            subprocess.run(["hyprctl", "dispatch", "focuswindow", f"address:{addr}"],
-                           capture_output=True, timeout=2)
+        win = match[0]
+        w = f"address:{win['address']}"
+        # Two thirds of the screen, within a dialog's sensible bounds.
+        mon = next((m for m in monitors if m.get("id") == monitor.get("monitorID")), None) \
+            or (monitors[0] if monitors else {})
+        scale = mon.get("scale") or 1
+        sw, sh = mon.get("width", 1600) / scale, mon.get("height", 1000) / scale
+        width, height = int(min(max(sw * 0.6, 720), 1100)), int(min(max(sh * 0.66, 520), 800))
+        if not win.get("floating"):
+            hypr_dispatch(f'hl.dsp.window.float({{ window = "{w}", action = "toggle" }})', "togglefloating", w)
+        hypr_dispatch(f'hl.dsp.window.resize({{ window = "{w}", x = {width}, y = {height} }})',
+                      "resizewindowpixel", f"exact {width} {height},{w}")
+        hypr_dispatch(f'hl.dsp.window.center({{ window = "{w}" }})', "centerwindow", w)
+        hypr_dispatch(f'hl.dsp.window.alter_zorder({{ window = "{w}", mode = "top" }})', "alterzorder", f"top,{w}")
+        hypr_dispatch(f'hl.dsp.focus({{ window = "{w}" }})', "focuswindow", w)
         return GLib.SOURCE_REMOVE
 
     GLib.timeout_add(100, attempt)
@@ -121,7 +142,7 @@ def run(bus, dest, handle, start_call, title):
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal_add(GLib.PRIORITY_HIGH, sig, stop)
     start_call(finish)
-    focus_when_mapped(title)
+    present_when_mapped(title)
     loop.run()
     if answer.get("error"):
         raise answer["error"]

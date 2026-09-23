@@ -335,7 +335,7 @@ Panel {
       waitForEnd: true
       onStreamFinished: if (text.trim() !== "") root.lastError = text.trim()
     }
-    onExited: { root.pickingDir = false; root.refreshStatus() }
+    onExited: { root.pickingDir = false; root.open(); root.refreshStatus() }
   }
 
   function pickDownloadDir() {
@@ -343,6 +343,10 @@ Panel {
     pickingDir = true
     lastError = ""
     pickDirProc.running = true
+    // The panel is a layer above every window, so a chooser cannot come up
+    // over it: it steps aside while the chooser is open and comes back with
+    // the answer.
+    root.close()
   }
 
   // ---------------------------------------------------------------- radar
@@ -503,6 +507,7 @@ Panel {
     sendClose.stop()
     sendProc.command = [root.cli, "send", "--pick", "--to", mac]
     sendProc.running = true
+    root.close()   // out of the chooser's way; back when it answers
   }
 
   Process {
