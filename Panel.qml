@@ -90,7 +90,7 @@ Panel {
   Timer {
     interval: 450
     repeat: true
-    running: root.busy || root.settling
+    running: root.busy || root.settling || root.radarWorking
     onTriggered: root.busyDots = root.busyDots.length >= 3 ? "." : root.busyDots + "."
     onRunningChanged: if (!running) root.busyDots = "."
   }
@@ -346,8 +346,18 @@ Panel {
   property bool soundOn: true
   property var peers: []            // [{mac, rssi, name}] -- the last listing, names merged in
   property var peerNames: ({})      // mac -> name, everything learnt this session
-  property string latestPeer: ""    // "hume 22:8b:38:31:89:4e", the newest name learnt
+  property bool namesResolved: false  // a name lookup has answered at least once
+  property var flashedMacs: ({})    // rows that have had their arrival flash
   readonly property bool scanning: radarOpen && root.opened && receiving && visibility === 1
+  // The line under the heading. Empty once there is a list to look at.
+  readonly property string radarStatus: {
+    if (!receiving) return "Turning Omdrop on"
+    if (!scanning) return "Waiting for the radio"
+    if (peers.length === 0) return "Searching for peers"
+    if (!namesResolved) return "Resolving peer names"
+    return ""
+  }
+  readonly property bool radarWorking: radarOpen && radarStatus !== ""
   // The device a send is going to stays listed until that send is over, even
   // if a poll stops hearing it mid-transfer: its row is where the progress is.
   readonly property var namedPeers: {
@@ -368,16 +378,25 @@ Panel {
   }
 
   function learnNames(list) {
-    var known = Object.assign({}, peerNames), fresh = ""
+    var known = Object.assign({}, peerNames)
     for (var i = 0; i < list.length; i++) {
       var p = list[i]
-      if (!p.name || known[p.mac] === p.name) continue
-      known[p.mac] = p.name
-      fresh = p.name + " " + p.mac
+      if (p.name) known[p.mac] = p.name
     }
     peerNames = known
-    if (fresh !== "") latestPeer = fresh
+    namesResolved = true
     mergePeers(peers)
+  }
+
+  // A row flashes once, the first time its device appears in the list. The
+  // list is rebuilt on every poll, so "first time" has to be remembered here
+  // rather than inferred from the row being created.
+  function claimFlash(mac) {
+    if (flashedMacs[mac]) return false
+    var f = Object.assign({}, flashedMacs)
+    f[mac] = true
+    flashedMacs = f
+    return true
   }
 
   function openRadar() {
@@ -901,21 +920,36 @@ Panel {
             width: parent.width
             spacing: Style.space(10)
 
-            // The newest device to give its name, or what the radar is doing
-            // until one has.
+            // What the radar is doing, until there is nothing left to say:
+            // searching until a device is heard, resolving until the first
+            // name lookup has answered, then gone.
             Text {
               width: parent.width
+              visible: root.radarWorking
               horizontalAlignment: Text.AlignHCenter
               textFormat: Text.PlainText
-              text: root.latestPeer !== "" ? root.latestPeer
-                  : !root.receiving ? "Turning Omdrop on to listen" + root.busyDots
-                  : root.scanning ? "Listening for nearby devices" + root.busyDots
-                  : "Waiting for the radio" + root.busyDots
-              color: root.latestPeer !== "" ? root.foreground : root.dim
+              text: root.radarStatus + root.busyDots
+              color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
-              font.bold: root.latestPeer !== ""
               elide: Text.ElideRight
+            }
+
+            // The devices that can be sent to, first under the heading, where a
+            // new one is seen the moment it arrives.
+            Repeater {
+              model: root.namedPeers
+              delegate: PeerRow {
+                required property var modelData
+                width: radarColumn.width
+                peer: modelData
+              }
+            }
+
+            PanelSeparator {
+              visible: root.namedPeers.length > 0
+              width: parent.width
+              foreground: root.foreground
             }
 
             Radar {
@@ -929,21 +963,6 @@ Panel {
               soundDir: Qt.resolvedUrl("share/sounds").toString().replace("file://", "")
               onMuteToggled: root.toggleSound()
               onPeerClicked: function(mac) { root.sendTo(mac) }
-            }
-
-            PanelSeparator {
-              visible: root.namedPeers.length > 0
-              width: parent.width
-              foreground: root.foreground
-            }
-
-            Repeater {
-              model: root.namedPeers
-              delegate: PeerRow {
-                required property var modelData
-                width: radarColumn.width
-                peer: modelData
-              }
             }
           }
         }
@@ -1011,6 +1030,23 @@ Panel {
 
     foreground: root.foreground
     implicitHeight: rowText.implicitHeight + Style.spacing.rowPaddingX
+
+    // A flash that fades, the first time this device's name appears, so a
+    // new arrival is noticed without looking for it.
+    Rectangle {
+      id: flash
+      anchors.fill: parent
+      radius: Style.space(4)
+      color: root.foreground
+      opacity: 0
+
+      SequentialAnimation {
+        id: flashAnim
+        NumberAnimation { target: flash; property: "opacity"; to: 0.45; duration: 120; easing.type: Easing.OutQuad }
+        NumberAnimation { target: flash; property: "opacity"; to: 0; duration: 1400; easing.type: Easing.InQuad }
+      }
+    }
+    Component.onCompleted: if (root.claimFlash(peer.mac)) flashAnim.start()
 
     Column {
       id: rowText

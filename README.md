@@ -140,7 +140,7 @@ percentage would allow a larger transfer.
 Open the panel and expand **Send to peers** (or press `n`). If Omdrop is off, expanding it turns Omdrop on for the time the slider shows, because a receive window is what hears the devices around you.
 
 - **The radar** draws each nearby device as a dot. A brighter dot, closer to the centre, means a stronger signal. It does not show a direction or a distance.
-- **Names** appear beside the dots as devices answer. The newest one is shown above the radar, and every named device is listed below it. While the section is open, the panel asks for names continuously. That means connecting to each device and briefly announcing this Apple ID over Bluetooth (see `peers -n` below), and it stops when you close the section.
+- **Names** appear beside the dots as devices answer, and each named device joins the list right under the heading with a brief flash. Until then, the line under the heading reads "Searching for peers...", then "Resolving peer names...". While the section is open, the panel asks for names continuously. That means connecting to each device and briefly announcing this Apple ID over Bluetooth (see `peers -n` below), and it stops when you close the section.
 - **Sending**: click a name in the list, or a labelled dot, and choose a file. The chooser opens in the folder you last sent from, or in the download folder the first time and whenever that folder is gone. The row shows the send's progress.
 - **Sound**: each named device pings as the sweep passes its dot, higher and louder for a stronger signal, and blips when its name first appears. Unnamed dots stay silent. The speaker in the radar's bottom-right corner mutes it, and the setting is remembered (`omdrop sound on|off`).
 
