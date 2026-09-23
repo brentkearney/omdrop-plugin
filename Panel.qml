@@ -504,6 +504,14 @@ Panel {
     sendStatus = "Cancelling…"
     sendProc.signal(15)
   }
+
+  // A failure stays on the row until it has been read; this puts the row back.
+  function dismissSend() {
+    if (sendProc.running) return
+    sendFailed = false
+    sendingTo = ""
+    sendStatus = ""
+  }
   readonly property bool sendActive: sendProc.running && sendChosen
 
   function sendTo(mac) {
@@ -1167,7 +1175,8 @@ Panel {
 
         Rectangle {
           id: cancelButton
-          visible: root.sendActive
+          // Cancels a send under way; dismisses a failure once it is read.
+          visible: root.sendActive || (root.sendFailed && !sendProc.running)
           anchors.right: parent.right
           anchors.top: parent.top
           width: Style.space(20); height: width
@@ -1187,12 +1196,12 @@ Panel {
             anchors.fill: parent
             hoverEnabled: true
             cursorShape: Qt.PointingHandCursor
-            onClicked: root.cancelSend()
+            onClicked: root.sendFailed ? root.dismissSend() : root.cancelSend()
           }
 
           PanelToolTip {
             visible: cancelMouse.containsMouse
-            text: "Cancel the send"
+            text: root.sendFailed ? "Dismiss" : "Cancel the send"
             fontFamily: root.fontFamily
           }
         }
