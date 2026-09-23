@@ -551,11 +551,15 @@ Panel {
       onRead: function(line) {
         line = line.trim()
         if (line === "") return
-        // The sender speaks of ports ("waiting up to 30s for <mac> to start
-        // listening on 8770"); from here it is simply the file on its way.
-        if (/^waiting up to \d+s for .* to start listening/.test(line))
-          line = "Sending " + (root.sendingFile || "the file") + " to "
+        // The sender speaks of ports and paths ("waiting up to 30s for <mac>
+        // to start listening on 8770", then "sending /full/path to <mac> at
+        // [fe80::…]:8770"); from here both are simply the file on its way.
+        var sending = /^sending (.*) to \S+ at /.exec(line)
+        if (sending || /^waiting up to \d+s for .* to start listening/.test(line)) {
+          var file = root.sendingFile || (sending ? sending[1].replace(/^.*\//, "") : "the file")
+          line = "Sending " + file + " to "
               + (root.peerNames[root.sendingTo] || root.sendingName || root.sendingTo) + "..."
+        }
         root.sendStatus = line
       }
     }
