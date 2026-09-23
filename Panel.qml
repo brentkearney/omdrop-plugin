@@ -374,12 +374,13 @@ Panel {
   }
   readonly property bool radarWorking: radarOpen && radarStatus !== ""
   // The device a send is going to stays listed until that send is over, even
-  // if a poll stops hearing it mid-transfer: its row is where the progress is.
+  // if a poll stops hearing it mid-transfer, and even if it never gave a name:
+  // its row is where the progress is. The address is the send's identity; a
+  // name that arrives meanwhile only relabels the row.
   readonly property var namedPeers: {
     var list = peers.filter(function(p) { return p.name !== "" })
-    if (sendingTo !== "" && sendingName !== ""
-        && !list.some(function(p) { return p.mac === sendingTo }))
-      list.push({ mac: sendingTo, rssi: null, name: sendingName })
+    if (sendingTo !== "" && !list.some(function(p) { return p.mac === sendingTo }))
+      list.push({ mac: sendingTo, rssi: null, name: peerNames[sendingTo] || sendingName })
     return list
   }
 
@@ -1107,7 +1108,8 @@ Panel {
           anchors.right: macText.left
           anchors.rightMargin: Style.space(8)
           textFormat: Text.PlainText
-          text: row.peer.name
+          // A device with no name yet is called by its address.
+          text: row.peer.name || row.peer.mac
           color: root.foreground
           font.family: root.fontFamily
           font.pixelSize: Style.font.body
@@ -1119,6 +1121,7 @@ Panel {
           id: macText
           anchors.right: parent.right
           anchors.verticalCenter: parent.verticalCenter
+          visible: row.peer.name !== ""
           text: row.peer.mac
           color: root.dim
           font.family: root.fontFamily
@@ -1186,7 +1189,7 @@ Panel {
 
     PanelToolTip {
       visible: rowMouse.containsMouse && !sendProc.running
-      text: "Send a file to " + row.peer.name
+      text: "Send a file to " + (row.peer.name || row.peer.mac)
       fontFamily: root.fontFamily
     }
   }

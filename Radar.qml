@@ -293,7 +293,8 @@ Item {
         pulseDecay.stop()
         flare = 1
         pulseDecay.restart()
-        // Every dot pulses; only named ones ping, since only they can be sent to.
+        // Every dot pulses; only named ones ping, so the sound marks the
+        // devices you know rather than every radio in the room.
         if (peerName !== "")
           root.playSound("contact-" + (1 + Math.round(strength * 4)) + ".wav", 0.55 + 0.45 * strength, mac)
       }
@@ -361,7 +362,9 @@ Item {
       }
       Item {
         id: peerButton
-        enabled: contact.present && contact.peerName !== ""
+        // Any dot can be sent to. A device need not have answered a name
+        // lookup to accept a file, so its address is target enough.
+        enabled: contact.present
         activeFocusOnTab: enabled && root.visible
         x: Math.min(-Style.space(14), label.x - Style.space(4))
         y: Math.min(-Style.space(14), label.y - Style.space(3))
@@ -369,7 +372,7 @@ Item {
         height: Math.max(Style.space(14), label.y + label.height + Style.space(3)) - y
         z: 1
         Accessible.role: Accessible.Button
-        Accessible.name: "Send to " + contact.peerName
+        Accessible.name: "Send to " + (contact.peerName || contact.mac)
         Accessible.onPressAction: root.peerClicked(contact.mac)
         Keys.onReturnPressed: root.peerClicked(contact.mac)
         Keys.onSpacePressed: root.peerClicked(contact.mac)
@@ -388,7 +391,7 @@ Item {
         }
         PanelToolTip {
           visible: root.visible && peerButton.enabled && peerMouse.containsMouse
-          text: "Send a file to " + contact.peerName
+          text: "Send a file to " + (contact.peerName || contact.mac)
           fontFamily: root.fontFamily
         }
       }
