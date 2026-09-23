@@ -1156,13 +1156,35 @@ cmd_send() {
   local cmd=("$SENDER" --name "$(effective_name)" --wait "$wait" --mac "$PEER" -- "$file")
 
   if (( verbose )); then
-    "${cmd[@]}"
+    run_cancellable "${cmd[@]}"
     return
   fi
-  # PIPESTATUS, not $?: the narrator always succeeds, and the answer to "did
-  # the file arrive" is the sender's exit status.
+  run_cancellable send_narrated
+}
+
+# PIPESTATUS, not $?: the narrator always succeeds, and the answer to "did
+# the file arrive" is the sender's exit status. Reads `cmd` from cmd_send.
+send_narrated() {
   "${cmd[@]}" | narrate_send
-  rc=${PIPESTATUS[0]}
+  return "${PIPESTATUS[0]}"
+}
+
+# Cancelling a send has to stop the sender, not just this script. Killed
+# while waiting on a pipeline, bash dies and leaves its children running, so
+# a cancelled send went on knocking on the device's door, and would still
+# have delivered the file if the door opened. The send runs as its own
+# process group instead, and a TERM, INT or HUP here takes the whole group
+# down before saying so.
+run_cancellable() {
+  local pid rc
+  set -m
+  "$@" &
+  pid=$!
+  set +m
+  trap 'kill -TERM -- "-$pid" 2>/dev/null; wait "$pid" 2>/dev/null; echo "Cancelled." >&2; exit 130' TERM INT HUP
+  wait "$pid"
+  rc=$?
+  trap - TERM INT HUP
   return "$rc"
 }
 

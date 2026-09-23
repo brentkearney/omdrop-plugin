@@ -494,6 +494,16 @@ Panel {
   property bool sendChosen: false    // the chooser answered with a file
   property bool sendFailed: false
   property bool sendDone: false
+  property bool sendCancelled: false
+
+  // The CLI stops the sender's whole process group on TERM, so nothing goes
+  // on knocking on the device's door after this.
+  function cancelSend() {
+    if (!sendProc.running) return
+    sendCancelled = true
+    sendStatus = "Cancelling…"
+    sendProc.signal(15)
+  }
   readonly property bool sendActive: sendProc.running && sendChosen
 
   function sendTo(mac) {
@@ -530,8 +540,13 @@ Panel {
     onExited: function(code) {
       root.open()
       // A cancelled chooser is exit 1 with nothing said: no send, no message.
-      if (code !== 0 && !root.sendChosen && root.sendStatus === "Choose a file…") {
+      // A send the person cancelled is not a failure either; the row just
+      // goes back to being a row.
+      if (root.sendCancelled
+          || (code !== 0 && !root.sendChosen && root.sendStatus === "Choose a file…")) {
+        root.sendCancelled = false
         root.sendingTo = ""
+        root.sendStatus = ""
         return
       }
       root.sendFailed = code !== 0
@@ -1091,6 +1106,7 @@ Panel {
 
     Column {
       id: rowText
+      z: 1   // above the row's MouseArea, so the cancel button gets its clicks
       anchors.left: parent.left
       anchors.right: parent.right
       anchors.leftMargin: Style.spacing.controlPaddingX
@@ -1129,15 +1145,57 @@ Panel {
         }
       }
 
-      Text {
+      // The status, with a way out: while a send is under way, an × to its
+      // right cancels it -- the wait for a sleeping device can run 30 s.
+      Item {
         width: parent.width
         visible: row.target && root.sendStatus !== ""
-        textFormat: Text.PlainText
-        text: root.sendStatus
-        color: root.sendFailed ? root.urgent : Qt.darker(root.foreground, 1.3)
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
-        wrapMode: Text.WordWrap
+        implicitHeight: Math.max(statusText.implicitHeight, cancelButton.visible ? cancelButton.height : 0)
+
+        Text {
+          id: statusText
+          anchors.left: parent.left
+          anchors.right: cancelButton.visible ? cancelButton.left : parent.right
+          anchors.rightMargin: cancelButton.visible ? Style.space(6) : 0
+          textFormat: Text.PlainText
+          text: root.sendStatus
+          color: root.sendFailed ? root.urgent : Qt.darker(root.foreground, 1.3)
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.WordWrap
+        }
+
+        Rectangle {
+          id: cancelButton
+          visible: root.sendActive
+          anchors.right: parent.right
+          anchors.top: parent.top
+          width: Style.space(20); height: width
+          radius: width / 2
+          color: cancelMouse.containsMouse ? Style.hoverFillFor(root.foreground, Color.accent) : "transparent"
+
+          Text {
+            anchors.centerIn: parent
+            text: "×"
+            color: cancelMouse.containsMouse ? root.foreground : root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+          }
+
+          MouseArea {
+            id: cancelMouse
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: root.cancelSend()
+          }
+
+          PanelToolTip {
+            visible: cancelMouse.containsMouse
+            text: "Cancel the send"
+            fontFamily: root.fontFamily
+          }
+        }
       }
 
       // Progress, honestly: the sender reports stages (asked, accepted, sent)

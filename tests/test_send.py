@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -68,6 +69,9 @@ if [ "$1" = --list ]; then
   exit 0
 fi
 [ -n "$SENDER_STDOUT" ] && printf '%s\\n' "$SENDER_STDOUT"
+# A sender still waiting for the device, which leaves a mark if it outlives
+# the send that started it.
+if [ -n "$SENDER_SLEEP" ]; then sleep "$SENDER_SLEEP"; : > "$CAPTURE.outlived"; fi
 exit "${SENDER_RC:-0}"
 """,
         )
@@ -225,6 +229,24 @@ class SendCommandTests(SenderFixture):
 
         self.assertEqual(result.returncode, 3)
         self.assertIn("declined", result.stderr)
+
+    def test_cancelling_a_send_stops_the_sender_too(self):
+        self.env["SENDER_SLEEP"] = "2"
+        proc = subprocess.Popen([OMDROP, "send", str(self.file)], env=self.env,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        deadline = time.monotonic() + 5
+        while not self.capture.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(self.capture.exists(), "the sender never started")
+
+        proc.terminate()
+        _, err = proc.communicate(timeout=5)
+        time.sleep(2.5)
+
+        self.assertEqual(proc.returncode, 130)
+        self.assertIn("Cancelled", err)
+        self.assertFalse(Path(f"{self.capture}.outlived").exists(),
+                         "the sender kept going after the send was cancelled")
 
     def test_verbose_keeps_the_log_a_bug_report_needs(self):
         result = self.run_omdrop("send", "--verbose", str(self.file))
