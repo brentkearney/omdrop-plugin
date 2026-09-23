@@ -12,10 +12,9 @@ https://github.com/user-attachments/assets/3e415609-6e25-48b0-b55f-58252c65356b
   - MacBook Pro 14" and 16", 2021: M1 Pro and M1 Max (j314, j316)
   - Mac Studio, 2022: M1 Max and M1 Ultra (j375)
   - MacBook Air 13", 2022: M2 (j413)
-  - MacBook Pro 13", 2022: M2 (j493)
-  - Mac mini, 2023: M2 (j473), not yet confirmed
+  - MacBook Air 15", 2023: M2 (j415)
 
-  Other Apple Broadcom chips may work but are untested. Intel, MediaTek, and Qualcomm cards can't do this.
+  Other Apple Broadcom chips are untested: the BCM4378 in base M1 Macs and the 2022 13" M2 MacBook Pro, and the BCM4388 in the 2023 M2 Mac mini and M2 Pro/Max/Ultra Macs. Intel, MediaTek, and Qualcomm cards can't do this.
 - **A `brcmfmac` driver with AWDL enabled.** The plugin installs one from [omdrop-awdl](https://github.com/brentkearney/omdrop-awdl) on first use.
 
 For AirDrop on other hardware, see [OpenDrop](https://github.com/seemoo-lab/opendrop) and [owl](https://github.com/seemoo-lab/owl), which implement AWDL in userspace over monitor mode. [LocalSend](https://localsend.org), which ships with Omarchy, is an open alternative that needs its app on every device.
