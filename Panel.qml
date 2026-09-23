@@ -495,6 +495,7 @@ Panel {
   property bool sendFailed: false
   property bool sendDone: false
   property bool sendCancelled: false
+  property string sendingFile: ""    // the chosen file's name, from "Preparing …"
 
   // The CLI stops the sender's whole process group on TERM, so nothing goes
   // on knocking on the device's door after this.
@@ -523,6 +524,7 @@ Panel {
     sendChosen = false
     sendFailed = false
     sendDone = false
+    sendingFile = ""
     sendClose.stop()
     sendProc.command = [root.cli, "send", "--pick", "--to", mac]
     sendProc.running = true
@@ -533,17 +535,29 @@ Panel {
     id: sendProc
     stdout: SplitParser {
       onRead: function(line) {
-        if (line.trim() === "") return
+        line = line.trim()
+        if (line === "") return
         if (!root.sendChosen) { root.sendChosen = true; root.open() }
-        root.sendStatus = line.trim()
+        var chosen = /^Preparing (.*)\.\.\.$/.exec(line)
+        if (chosen) root.sendingFile = chosen[1]
+        root.sendStatus = line
       }
     }
-    // Line by line, like stdout: the sender says "waiting up to 30s…" while
-    // it waits for the device, which is progress worth seeing, and its last
+    // Line by line, like stdout: the sender says it is waiting while the
+    // device's receiver wakes, which is progress worth seeing, and its last
     // line is the reason a failure failed. Keeping only the first line showed
     // the wait as if it were the outcome.
     stderr: SplitParser {
-      onRead: function(line) { if (line.trim() !== "") root.sendStatus = line.trim() }
+      onRead: function(line) {
+        line = line.trim()
+        if (line === "") return
+        // The sender speaks of ports ("waiting up to 30s for <mac> to start
+        // listening on 8770"); from here it is simply the file on its way.
+        if (/^waiting up to \d+s for .* to start listening/.test(line))
+          line = "Sending " + (root.sendingFile || "the file") + " to "
+              + (root.peerNames[root.sendingTo] || root.sendingName || root.sendingTo) + "..."
+        root.sendStatus = line
+      }
     }
     onExited: function(code) {
       root.open()
