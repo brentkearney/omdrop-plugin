@@ -1,19 +1,12 @@
 # Omdrop
 
-AirDrop for [Omarchy](https://omarchy.org) on Apple Silicon Macs: send and receive files with nearby iPhones, iPads, and Macs, in both Everyone and Contacts Only mode.
+AirDrop for [Omarchy](https://omarchy.org) Apple Silicon Macs with Broadcom WiFi chips (M1 & M2, maybe some early M3s). Send and receive files with nearby iPhones, iPads, and Macs, in both Everyone and Contacts Only mode.
 
 ![Omdrop: AirDrop for Omarchy on Apple Silicon. The panel lists nearby devices above a radar of their signal strength.](preview.png)
 
 ## Requirements
-
-- **Broadcom Wi-Fi whose firmware implements AWDL**, the link layer Apple devices use to talk to each other directly. Verified on the BCM4387 (`14e4:4433`), which ships in:
-  - MacBook Pro 14" and 16", 2021: M1 Pro and M1 Max (j314, j316)
-  - Mac Studio, 2022: M1 Max and M1 Ultra (j375)
-  - MacBook Air 13", 2022: M2 (j413)
-  - MacBook Air 15", 2023: M2 (j415)
-
-  Other Apple Broadcom chips are untested: the BCM4378 in base M1 Macs and the 2022 13" M2 MacBook Pro, and the BCM4388 in the 2023 M2 Mac mini and M2 Pro/Max/Ultra Macs. Intel, MediaTek, and Qualcomm cards can't do this, and neither can a virtual machine such as Try Omarchy.
 - **A `brcmfmac` driver with AWDL enabled.** The plugin installs one from [omdrop-awdl](https://github.com/brentkearney/omdrop-awdl) on first use.
+- **Broadcom Wi-Fi whose firmware implements AWDL**: see [Hardware Compatibility](https://github.com/brentkearney/omdrop-awdl/blob/main/README.md#hardware-compatibility) on the driver project.
 
 For AirDrop on other hardware, see [OpenDrop](https://github.com/seemoo-lab/opendrop) and [owl](https://github.com/seemoo-lab/owl), which implement AWDL in userspace over monitor mode. [LocalSend](https://localsend.org), which ships with Omarchy, is an open alternative that needs its app on every device.
 
