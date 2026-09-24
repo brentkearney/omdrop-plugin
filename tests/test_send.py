@@ -70,8 +70,8 @@ if [ "$1" = --list ]; then
 fi
 [ -n "$SENDER_STDOUT" ] && printf '%s\\n' "$SENDER_STDOUT"
 # A sender still waiting for the device, which leaves a mark if it outlives
-# the send that started it.
-if [ -n "$SENDER_SLEEP" ]; then sleep "$SENDER_SLEEP"; : > "$CAPTURE.outlived"; fi
+# the send that started it. It ignores TERM, as the real one can.
+if [ -n "$SENDER_SLEEP" ]; then trap '' TERM; sleep "$SENDER_SLEEP"; : > "$CAPTURE.outlived"; fi
 exit "${SENDER_RC:-0}"
 """,
         )

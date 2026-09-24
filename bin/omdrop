@@ -54,7 +54,7 @@ PROJ="$(cd "$(dirname "$SELF")/.." && pwd)"
 # A fallback that silently substitutes for the real value is the same class of
 # defect as a status line reporting a state that was never entered, so this one
 # says when it is guessing, and says when the two disagree.
-VERSION_FALLBACK=0.7.0
+VERSION_FALLBACK=0.7.1
 omdrop_version() {
   local dir manifest version= real
   real=$(readlink -f "$0" 2>/dev/null) || real="$0"
@@ -1169,19 +1169,35 @@ send_narrated() {
   return "${PIPESTATUS[0]}"
 }
 
+stop_group() {
+  local g=$1 i
+  kill -TERM -- "-$g" 2>/dev/null || return 0
+  for i in $(seq 20); do
+    kill -0 -- "-$g" 2>/dev/null || break
+    sleep 0.1
+  done
+  kill -KILL -- "-$g" 2>/dev/null
+  wait "$g" 2>/dev/null
+}
+
 # Cancelling a send has to stop the sender, not just this script. Killed
 # while waiting on a pipeline, bash dies and leaves its children running, so
 # a cancelled send went on knocking on the device's door, and would still
 # have delivered the file if the door opened. The send runs as its own
 # process group instead, and a TERM, INT or HUP here takes the whole group
 # down before saying so.
+#
+# TERM first, so the sender can take its Bluetooth advert down itself, then
+# KILL whatever is left. The sender does not always exit on TERM: measured
+# 2026-09-23, a lookup given TERM stopped advertising but went on starting
+# probes for as long as it had peers to ask.
 run_cancellable() {
   local pid rc
   set -m
   "$@" &
   pid=$!
   set +m
-  trap 'kill -TERM -- "-$pid" 2>/dev/null; wait "$pid" 2>/dev/null; echo "Cancelled." >&2; exit 130' TERM INT HUP
+  trap 'stop_group "$pid"; echo "Cancelled." >&2; exit 130' TERM INT HUP
   wait "$pid"
   rc=$?
   trap - TERM INT HUP
@@ -1275,6 +1291,8 @@ cmd_peers() {
   # the first is something the person can act on, so decide it here, where the
   # window state is known, rather than printing one sentence for both.
   local out rc
+  # The listing itself, for run_cancellable. Reads names and wake from cmd_peers.
+  peers_lookup() { "$SENDER" --list "${names[@]}" "${wake[@]}" > "$1"; }
   # Naming takes fifteen to twenty seconds: the advert has to be recognized,
   # the peer has to start its AirDrop server, and the first /Discover is
   # usually killed by that server's own restart and retried. Measured 15.5-17.6
@@ -1282,12 +1300,24 @@ cmd_peers() {
   # transmits nothing and returns at once, so it gets no animation.
   # The panel asks for JSON and draws its own progress, so it gets no spinner
   # (and has no terminal for one anyway).
+  #
+  # A named lookup transmits for as long as it runs, so it must stop when
+  # this command is stopped. The panel ends one every time its section closes,
+  # and a bare kill of this script left the sender and its Bluetooth advert
+  # running, orphaned: they piled up alongside the next lookup, several
+  # adverts and connection bursts at once, and names stopped resolving. So the
+  # lookup runs as its own process group, like a send, and writes its answer
+  # to a file this shell reads once it has finished.
+  # A global, not a local: the EXIT trap runs after this function returns.
+  PEERS_TMP=$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omdrop-peers.XXXXXX") || die "could not make a temporary file"
+  trap 'rm -f "$PEERS_TMP"' EXIT
   if (( ${#names[@]} && ! json )); then
-    out=$(spinner_while "Asking nearby devices for their names" \
-            "$SENDER" --list "${names[@]}" "${wake[@]}"); rc=$?
+    run_cancellable spinner_while "Asking nearby devices for their names" \
+      peers_lookup "$PEERS_TMP"; rc=$?
   else
-    out=$("$SENDER" --list "${names[@]}" "${wake[@]}"); rc=$?
+    run_cancellable peers_lookup "$PEERS_TMP"; rc=$?
   fi
+  out=$(<"$PEERS_TMP")
   if (( json )); then
     # An empty room is still an answer the panel can draw: `[]` on stdout, and
     # the same exit status and sentence as the text form on stderr.
