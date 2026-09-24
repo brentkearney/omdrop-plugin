@@ -720,7 +720,14 @@ Panel {
 
   // Opening the panel should show the truth immediately, not up to ten
   // seconds of whatever was true when it was last closed.
-  onOpenedChanged: if (opened && !busy) root.refreshStatus()
+  //
+  // Send to peers opens only when asked, so it collapses whenever the panel
+  // closes -- except when the panel has only stepped aside for a chooser,
+  // which it does mid-send and comes back from with the send's row showing.
+  onOpenedChanged: {
+    if (opened && !busy) root.refreshStatus()
+    if (!opened && !sendProc.running && !pickingDir) radarOpen = false
+  }
 
   IpcHandler {
     target: root.ipcTarget
