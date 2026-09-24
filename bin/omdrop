@@ -54,7 +54,7 @@ PROJ="$(cd "$(dirname "$SELF")/.." && pwd)"
 # A fallback that silently substitutes for the real value is the same class of
 # defect as a status line reporting a state that was never entered, so this one
 # says when it is guessing, and says when the two disagree.
-VERSION_FALLBACK=0.8.0
+VERSION_FALLBACK=0.8.1
 omdrop_version() {
   local dir manifest version= real
   real=$(readlink -f "$0" 2>/dev/null) || real="$0"
@@ -182,10 +182,14 @@ omdrop -- send and receive files with nearby Apple devices
   senders [add|remove ID | list]
                      manage the known-senders list (emails and phone numbers)
   setup             install what receiving needs: the service, the name Macs
-                    see, and this computer's certificate. Safe to run again.
+                    see, this computer's certificate, and the handler that
+                    opens received links on double-click. Safe to run again.
   doctor [--json]   what is still missing before this can receive
   install-driver    build and install the Wi-Fi driver, in a terminal you watch
   firewall ACTION   install or remove Omdrop's narrow UFW receiver rule
+  links ACTION      install or remove the double-click handler for received
+                    .url and .webloc links
+  open-link FILE    open a .url or .webloc link in the browser (web links only)
   version           the plugin version, for bug reports
 
 Aliases, if you reach for a different word:
@@ -461,6 +465,10 @@ cmd_setup() {
   elif [[ "$current" != "$plugin/bin/omdrop" ]]; then
     echo "Left $link alone: it is not ours and points at $current." >&2
   fi
+
+  # Received links are stored as .url files, and a Mac may send a .webloc.
+  # Without this, double-clicking one opens it in a text editor.
+  links_install "$plugin" && did=1
 
   if [[ -z "$(cfg_get name)" ]]; then
     cfg_set name "$(default_name)" \
@@ -1509,14 +1517,60 @@ cmd_watch() {
   done
 }
 
-# The URL inside an Apple .webloc or a Windows .url shortcut. Both are what an
-# Apple device sends when you share a link rather than a file.
-link_target() {
-  case "${1,,}" in
-    *.url)    sed -n 's/^URL=//p' "$1" | head -1 ;;
-    *.webloc) grep -oE 'https?://[^<]+' "$1" | head -1 ;;
+# The URL inside an Apple .webloc or a Windows .url shortcut, unchecked. Both
+# are what an Apple device sends when you share a link rather than a file, and
+# the receiver stores a link it is handed directly as a .url.
+#
+# .url: the first URL= in the [InternetShortcut] section, CR stripped, because
+# a Windows-written file has CRLF lines and a URL= elsewhere is not the link.
+# .webloc: the URL key of a property list, XML or binary -- macOS writes both.
+# Capped at 64 KiB: these arrive from whoever is nearby, and a real one is a
+# few hundred bytes.
+link_url() {
+  local f=$1
+  [[ -f "$f" && -r "$f" ]] || return 1
+  (( $(stat -c %s -- "$f" 2>/dev/null || echo 65537) <= 65536 )) || return 1
+  case "${f,,}" in
+    *.url)
+      awk '
+        { sub(/\r$/, "") }
+        /^[ \t]*\[/ { s = tolower($0); gsub(/[ \t]/, "", s); in_section = (s == "[internetshortcut]"); next }
+        in_section && tolower($0) ~ /^[ \t]*url[ \t]*=/ {
+          sub(/^[^=]*=[ \t]*/, ""); sub(/[ \t]+$/, ""); print; exit
+        }' "$f" ;;
+    *.webloc)
+      python3 -c '
+import plistlib, sys
+try:
+    with open(sys.argv[1], "rb") as fh:
+        url = plistlib.load(fh).get("URL")
+except Exception:
+    sys.exit(1)
+if isinstance(url, str):
+    print(url.strip())' "$f" ;;
+    *) return 1 ;;
   esac
 }
+
+# Whether a URL is a web page, the only kind Omdrop opens. A received link can
+# name file://, smb://, or an app's custom scheme, and it was chosen by
+# whoever is nearby, so everything else is refused before anything launches.
+web_url() {
+  local u=$1 l=${1,,} rest
+  [[ "$l" == http://* || "$l" == https://* ]] || return 1
+  [[ "$u" != *[[:space:][:cntrl:]]* ]] || return 1
+  rest=${l#*://}
+  [[ -n "$rest" && "$rest" != /* ]]
+}
+
+# The web link in a link file, or nothing and a failure. Every caller that
+# opens or copies a link goes through here, so there is one gate.
+link_target() {
+  local url
+  url=$(link_url "$1") && web_url "$url" && printf '%s\n' "$url"
+}
+
+is_link_file() { case "${1,,}" in *.url|*.webloc) return 0 ;; esac; return 1; }
 
 # Launch a GUI app so it OUTLIVES us. The watcher runs as a transient systemd
 # service, and a service's cgroup is killed when it exits -- taking any
@@ -1537,10 +1591,148 @@ launch() {
 }
 
 act_open() {
-  local f=$1 url; url=$(link_target "$f")
-  if [[ -n "$url" ]]; then omarchy-launch-browser "$url" >/dev/null 2>&1 &
+  local f=$1
+  if is_link_file "$f"; then cmd_open_link "$f"
   else launch xdg-open "$f"
   fi
+}
+
+# `open-link FILE`: open a link file's web page in the browser. The one entry
+# point for both the notification's click and a double-click in the file
+# manager, which reaches it through the desktop entry `links install` writes.
+# A link that is not a web page is refused with a notification, because
+# whoever double-clicked is looking at the file manager, not a terminal.
+cmd_open_link() {
+  local f=${1:?usage: omdrop open-link FILE} url raw why
+  if url=$(link_target "$f"); then
+    omarchy-launch-browser "$url" >/dev/null 2>&1
+    return
+  fi
+  if raw=$(link_url "$f") && [[ "$raw" == *:* ]]; then
+    why="It points to a ${raw%%:*}: address, and Omdrop opens only web links."
+  else
+    why="There is no web link in it."
+  fi
+  omarchy-notification-send "Can't open $(basename "$f")" "$why" >/dev/null 2>&1 \
+    || echo "omdrop: can't open $f: $why" >&2
+  return 1
+}
+
+# Double-clicking a received link file in the file manager. freedesktop
+# already knows .url as application/x-mswinurl; .webloc is unknown to
+# shared-mime-info (it detects as text/xml and opens in an editor), so it gets
+# a type of its own, application/x-webloc, a name nothing installed claims.
+LINK_APP=netmojo.omdrop-links.desktop
+LINK_MIME=netmojo.omdrop-webloc.xml
+LINK_TYPES=(application/x-mswinurl application/x-webloc)
+
+data_home() { printf '%s' "${XDG_DATA_HOME:-$HOME/.local/share}"; }
+mimeapps_list() { printf '%s' "${XDG_CONFIG_HOME:-$HOME/.config}/mimeapps.list"; }
+
+# The default the user's own mimeapps.list names for a type, if any. Read
+# directly rather than through `xdg-mime query default`, which also answers
+# with any installed app that merely claims the type -- and only a default
+# someone set is one to leave alone.
+user_default() {
+  local list; list=$(mimeapps_list)
+  [[ -r "$list" ]] || return 0
+  awk -v t="$1" '
+    /^\[/ { in_defaults = ($0 == "[Default Applications]"); next }
+    in_defaults && index($0, t "=") == 1 { v = substr($0, length(t) + 2); sub(/;.*/, "", v); print v; exit }
+  ' "$list"
+}
+
+# An Exec path, quoted as the Desktop Entry spec requires: backslash before
+# " ` $ and \ inside the quotes, every backslash doubled again because the
+# value is a key-file string, and % doubled so it is not a field code.
+desktop_exec_quote() {
+  local s=$1
+  s=${s//\\/\\\\}; s=${s//\"/\\\"}; s=${s//\`/\\\`}; s=${s//\$/\\\$}
+  s=${s//\\/\\\\}; s=${s//%/%%}
+  printf '"%s"' "$s"
+}
+
+# Write a file only when its content differs; succeeds only if it wrote.
+write_if_changed() {
+  local path=$1 content=$2
+  [[ -r "$path" && "$(cat "$path")" == "$content" ]] && return 1
+  mkdir -p "$(dirname "$path")" && printf '%s\n' "$content" > "$path"
+}
+
+# Install the handler; succeeds only if it changed anything, and says what.
+links_install() {
+  local plugin=$1 apps mime t current changed=1
+  apps="$(data_home)/applications"; mime="$(data_home)/mime"
+  if write_if_changed "$apps/$LINK_APP" "[Desktop Entry]
+Type=Application
+Name=Omdrop link opener
+Comment=Open a link an Apple device sent over AirDrop in the web browser
+Exec=$(desktop_exec_quote "$plugin/bin/omdrop") open-link %f
+MimeType=application/x-mswinurl;application/x-webloc;
+NoDisplay=true
+Terminal=false"; then
+    changed=0
+    update-desktop-database "$apps" >/dev/null 2>&1 || true
+  fi
+  if write_if_changed "$mime/packages/$LINK_MIME" '<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-webloc">
+    <comment>Website location</comment>
+    <glob pattern="*.webloc"/>
+  </mime-type>
+</mime-info>'; then
+    changed=0
+    update-mime-database "$mime" >/dev/null 2>&1 \
+      || echo "omdrop: update-mime-database failed, so .webloc files may still open as XML." >&2
+  fi
+  for t in "${LINK_TYPES[@]}"; do
+    current=$(user_default "$t")
+    if [[ -z "$current" ]]; then
+      # xdg-mime cannot create the folder, and exits 0 when it fails, so
+      # make the folder first and check the result afterwards.
+      mkdir -p "$(dirname "$(mimeapps_list)")"
+      xdg-mime default "$LINK_APP" "$t" >/dev/null 2>&1
+      if [[ "$(user_default "$t")" == "$LINK_APP" ]]; then changed=0
+      else echo "omdrop: could not make Omdrop open $t files. Run: xdg-mime default $LINK_APP $t" >&2
+      fi
+    elif [[ "$current" != "$LINK_APP" ]]; then
+      echo "Left $t opening with $current, which you chose. To open received links with Omdrop: xdg-mime default $LINK_APP $t" >&2
+    fi
+  done
+  (( changed == 0 )) && echo "Set up double-clicking a received .url or .webloc link to open it in the browser."
+  return "$changed"
+}
+
+# Reverse links_install. A default is removed only while it still names us,
+# so a user who pointed a type elsewhere keeps their choice.
+links_remove() {
+  local apps mime list t
+  apps="$(data_home)/applications"; mime="$(data_home)/mime"; list=$(mimeapps_list)
+  for t in "${LINK_TYPES[@]}"; do
+    [[ "$(user_default "$t")" == "$LINK_APP" && -w "$list" ]] || continue
+    T="$t=" A="$LINK_APP" awk '
+      /^\[/ { in_defaults = ($0 == "[Default Applications]") }
+      in_defaults && ($0 == ENVIRON["T"] ENVIRON["A"] || $0 == ENVIRON["T"] ENVIRON["A"] ";") { next }
+      { print }' "$list" > "$list.omdrop.$$" && mv -f "$list.omdrop.$$" "$list"
+  done
+  if [[ -e "$apps/$LINK_APP" ]]; then
+    rm -f "$apps/$LINK_APP"
+    update-desktop-database "$apps" >/dev/null 2>&1 || true
+  fi
+  if [[ -e "$mime/packages/$LINK_MIME" ]]; then
+    rm -f "$mime/packages/$LINK_MIME"
+    update-mime-database "$mime" >/dev/null 2>&1 || true
+  fi
+  echo "Removed the handler for received .url and .webloc links."
+}
+
+cmd_links() {
+  case "${1:-}" in
+    install) local plugin; plugin=$(plugin_dir) || die "omdrop cannot tell where it is installed."
+             links_install "$plugin" || echo "The link handler was already set up." ;;
+    remove)  links_remove ;;
+    *) die "usage: omdrop links install|remove" ;;
+  esac
 }
 
 # A received link is a URL chosen by whoever is standing nearby, and while
@@ -1813,6 +2005,8 @@ case "${1:-status}" in
   senders) shift; cmd_senders "$@" ;;
   setup)  shift; cmd_setup "$@" ;;
   doctor) shift; cmd_doctor "$@" ;;
+  links)  shift; cmd_links "$@" ;;
+  open-link) shift; cmd_open_link "$@" ;;
   install-driver) shift; cmd_install_driver ;;
   firewall) shift; cmd_firewall "$@" ;;
   act)    shift; cmd_act "$@" ;;

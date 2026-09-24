@@ -36,6 +36,8 @@ Click the icon to open the panel:
 
 Received files are saved, copied to the clipboard, and announced in a notification. Clicking the notification opens the file.
 
+A shared link arrives as a `.url` or `.webloc` file. Clicking its notification, or double-clicking it in Files, opens it in your browser. Only `http` and `https` links open; a link to anything else, such as `file://` or `smb://`, is refused with a notification, because it was chosen by whoever sent it.
+
 ## Send files
 
 Expand **Send to peers**, or press `n` in the panel. If Omdrop is off, this turns it on, because the receive window is what hears nearby devices.
@@ -101,6 +103,7 @@ The receiver runs as you, so received files are yours. The firewall rule is adde
 
 ```bash
 omdrop firewall remove
+omdrop links remove
 omarchy plugin remove netmojo.omdrop
 sudo pacman -R brcmfmac-awdl-dkms
 ```
