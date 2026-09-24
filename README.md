@@ -4,7 +4,7 @@ AirDrop for [Omarchy](https://omarchy.org) on Apple Silicon Macs: send and recei
 
 https://github.com/user-attachments/assets/3e415609-6e25-48b0-b55f-58252c65356b
 
-<img src="preview.png" alt="The Omdrop panel: receive switch, visibility timer, a list of nearby devices above a radar of their signal strength, device name, and download folder" width="320">
+![Omdrop: AirDrop for Omarchy on Apple Silicon. The panel lists nearby devices above a radar of their signal strength.](preview.png)
 
 ## Requirements
 
