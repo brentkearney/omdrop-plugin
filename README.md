@@ -2,8 +2,6 @@
 
 AirDrop for [Omarchy](https://omarchy.org) on Apple Silicon Macs: send and receive files with nearby iPhones, iPads, and Macs, in both Everyone and Contacts Only mode.
 
-https://github.com/user-attachments/assets/3e415609-6e25-48b0-b55f-58252c65356b
-
 ![Omdrop: AirDrop for Omarchy on Apple Silicon. The panel lists nearby devices above a radar of their signal strength.](preview.png)
 
 ## Requirements
