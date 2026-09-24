@@ -54,7 +54,7 @@ PROJ="$(cd "$(dirname "$SELF")/.." && pwd)"
 # A fallback that silently substitutes for the real value is the same class of
 # defect as a status line reporting a state that was never entered, so this one
 # says when it is guessing, and says when the two disagree.
-VERSION_FALLBACK=0.7.2
+VERSION_FALLBACK=0.7.3
 omdrop_version() {
   local dir manifest version= real
   real=$(readlink -f "$0" 2>/dev/null) || real="$0"
@@ -497,7 +497,24 @@ cmd_setup() {
 # installed the plugin before the driver.
 # Each line is "id<TAB>sentence": the id is for the panel, which offers to fix
 # the one thing it can, and the sentence is for the person reading it.
+# Broadcom (vendor 0x14e4) network hardware on PCI, which is where Apple's
+# Wi-Fi sits on Apple Silicon. Without it the driver cannot help: a VM such as
+# Try Omarchy, or another laptop, has no AWDL-capable radio to configure, and
+# building a kernel module there only fails.
+apple_broadcom_wifi() {
+  local d
+  for d in /sys/bus/pci/devices/*; do
+    [[ "$(cat "$d/vendor" 2>/dev/null)" == 0x14e4 && "$(cat "$d/class" 2>/dev/null)" == 0x0280* ]] && return 0
+  done
+  return 1
+}
+
 prereqs_missing() {
+  # First, and alone: nothing else on this list can be fixed on this machine.
+  if ! apple_broadcom_wifi; then
+    printf 'hardware\t%s\n' "This computer has no Apple Broadcom Wi-Fi, which AirDrop needs. Omdrop runs only on Apple Silicon Macs, not in a virtual machine."
+    return 0
+  fi
   opendrop_installed \
     || printf 'library\t%s\n' "The AirDrop support library is not installed. The button below installs it along with the driver."
   if [[ ! -x "$DISCOVERABLE" ]]; then
@@ -608,6 +625,8 @@ cmd_install_driver() {
     echo "The driver and the AirDrop support library are both installed. Nothing to do."
     return 0
   fi
+  apple_broadcom_wifi \
+    || die "This computer has no Apple Broadcom Wi-Fi, so the driver cannot do anything here. Omdrop runs only on Apple Silicon Macs, not in a virtual machine."
   # Into the cache directory, not a temp dir. Three reasons: someone who has
   # just installed a kernel module as root should still have the source they
   # built afterwards, /tmp is tmpfs on this hardware so the clone and the built
@@ -687,8 +706,19 @@ $self_q firewall install"
     return 0
   fi
   echo "Opening a terminal to install the driver."
+  # A subshell, so a failed step ends the script and not the terminal. With
+  # `set -e` at the top level of the launcher's shell, the first failure exited
+  # before the launcher's own "press any key" prompt, and the window closed
+  # with the error in it before anyone could read it. Exit 130 skips the
+  # launcher's "Done!", which a failure should not show.
+  #
+  # Tested on its own line, not with `||`: bash ignores `set -e` inside a
+  # subshell whose status a `||` is testing, so every step would run on
+  # regardless of the ones before it failing.
+  local script="( $build
+); rc=\$?; if [ \$rc -ne 0 ]; then echo; echo \"Installing failed (exit \$rc). The messages above say why.\"; read -rsn 1 -p 'Press any key to close...' </dev/tty; echo; exit 130; fi"
   omarchy-launch-floating-terminal-with-presentation \
-    "echo 'Omdrop requires a patched wifi driver, which requires administrative privilege to install. You will be prompted for your password.'; echo; $build"
+    "echo 'Omdrop requires a patched wifi driver, which requires administrative privilege to install. You will be prompted for your password.'; echo; $script"
 }
 
 cmd_on() {

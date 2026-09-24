@@ -14,7 +14,7 @@ https://github.com/user-attachments/assets/3e415609-6e25-48b0-b55f-58252c65356b
   - MacBook Air 13", 2022: M2 (j413)
   - MacBook Air 15", 2023: M2 (j415)
 
-  Other Apple Broadcom chips are untested: the BCM4378 in base M1 Macs and the 2022 13" M2 MacBook Pro, and the BCM4388 in the 2023 M2 Mac mini and M2 Pro/Max/Ultra Macs. Intel, MediaTek, and Qualcomm cards can't do this.
+  Other Apple Broadcom chips are untested: the BCM4378 in base M1 Macs and the 2022 13" M2 MacBook Pro, and the BCM4388 in the 2023 M2 Mac mini and M2 Pro/Max/Ultra Macs. Intel, MediaTek, and Qualcomm cards can't do this, and neither can a virtual machine such as Try Omarchy.
 - **A `brcmfmac` driver with AWDL enabled.** The plugin installs one from [omdrop-awdl](https://github.com/brentkearney/omdrop-awdl) on first use.
 
 For AirDrop on other hardware, see [OpenDrop](https://github.com/seemoo-lab/opendrop) and [owl](https://github.com/seemoo-lab/owl), which implement AWDL in userspace over monitor mode. [LocalSend](https://localsend.org), which ships with Omarchy, is an open alternative that needs its app on every device.
@@ -23,10 +23,9 @@ For AirDrop on other hardware, see [OpenDrop](https://github.com/seemoo-lab/open
 
 ```bash
 omarchy plugin add https://github.com/brentkearney/omdrop-plugin.git
-omarchy plugin enable netmojo.omdrop
 ```
 
-The icon, a triangle dropping into a box, appears on the right of the bar. To move it, run `omarchy bar move netmojo.omdrop --section center`.
+Answer yes when it asks to enable the plugin. The icon, a triangle dropping into a box, appears on the right of the bar. To move it, run `omarchy bar move netmojo.omdrop --section center`.
 
 On first use, the panel opens a terminal that asks for your password to:
 
