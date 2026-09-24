@@ -231,7 +231,7 @@ class SendCommandTests(SenderFixture):
         self.assertIn("declined", result.stderr)
 
     def test_cancelling_a_send_stops_the_sender_too(self):
-        self.env["SENDER_SLEEP"] = "2"
+        self.env["SENDER_SLEEP"] = "5"  # longer than the 2 s grace before SIGKILL
         proc = subprocess.Popen([OMDROP, "send", str(self.file)], env=self.env,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         deadline = time.monotonic() + 5
@@ -241,7 +241,7 @@ class SendCommandTests(SenderFixture):
 
         proc.terminate()
         _, err = proc.communicate(timeout=5)
-        time.sleep(2.5)
+        time.sleep(5.5)
 
         self.assertEqual(proc.returncode, 130)
         self.assertIn("Cancelled", err)
