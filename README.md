@@ -1,6 +1,6 @@
 # Omdrop
 
-AirDrop for [Omarchy](https://omarchy.org) Apple Silicon Macs with Broadcom WiFi chips (M1 & M2, maybe some early M3s). Send and receive files with nearby iPhones, iPads, and Macs, in both Everyone and Contacts Only mode.
+AirDrop for [Omarchy](https://omarchy.org) Apple Silicon Macs with Broadcom WiFi chips (M1 & M2 machines). Send and receive files with nearby iPhones, iPads, and Macs, in both Everyone and Contacts Only mode.
 
 ![Omdrop: AirDrop for Omarchy on Apple Silicon. The panel lists nearby devices above a radar of their signal strength.](preview.png)
 
