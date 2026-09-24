@@ -54,7 +54,7 @@ PROJ="$(cd "$(dirname "$SELF")/.." && pwd)"
 # A fallback that silently substitutes for the real value is the same class of
 # defect as a status line reporting a state that was never entered, so this one
 # says when it is guessing, and says when the two disagree.
-VERSION_FALLBACK=0.7.3
+VERSION_FALLBACK=0.8.0
 omdrop_version() {
   local dir manifest version= real
   real=$(readlink -f "$0" 2>/dev/null) || real="$0"
@@ -158,12 +158,13 @@ omdrop -- send and receive files with nearby Apple devices
   off               stop receiving and advertising, cancel any pending window
   toggle            off if receiving, on if not
   status [--json]   receiving or not, time left, the name Macs see
-  send FILE         send a file to a nearby Apple device. Turn a window on
-                    first (omdrop on): that is what hears the devices around
-                    you. --to ADDRESS chooses one when several are heard, and
-                    --wait SECONDS keeps trying for that long while an
-                    iPhone's receiver is asleep (default 30). --pick asks
-                    for the file in a chooser instead.
+  send FILE...      send files to a nearby Apple device, as one transfer
+                    it accepts once. Turn a window on first (omdrop on):
+                    that is what hears the devices around you. --to ADDRESS
+                    chooses one when several are heard, and --wait SECONDS
+                    keeps trying for that long while an iPhone's receiver
+                    is asleep (default 30). --pick asks for the files in a
+                    chooser instead.
   peers [-n]        the Apple devices nearby right now. -n also asks
                     each one for its name, which means connecting to it and
                     showing this machine to every device listed, and briefly
@@ -608,7 +609,7 @@ DRIVER_PKG=brcmfmac-awdl-dkms
 # checkout below is detached at this SHA and the build only runs if it
 # succeeded. Bump it, in the same commit, whenever the plugin needs a newer
 # driver: the full 40 characters, because a short SHA is not a pin.
-DRIVER_COMMIT=1af874bebfd6f10f3aa1ec05640e181ba8173219
+DRIVER_COMMIT=4b3daaeec13fa9c9e5d1127c6e2b6dfb5b2ba499
 
 # The AirDrop support library, pinned the same way and for a stronger reason:
 # the receiver imports opendrop and executes it, so its code is part of this
@@ -621,8 +622,8 @@ OPENDROP_COMMIT=cf6d192a1458c491c0543b8289b7698bcb1b2d47
 cmd_install_driver() {
   local self_q
   printf -v self_q '%q' "$0"
-  if [[ -x "$DISCOVERABLE" ]] && opendrop_installed; then
-    echo "The driver and the AirDrop support library are both installed. Nothing to do."
+  if [[ -x "$DISCOVERABLE" ]] && driver_current && opendrop_installed; then
+    echo "The driver and the AirDrop support library are both installed and current. Nothing to do."
     return 0
   fi
   apple_broadcom_wifi \
@@ -674,7 +675,9 @@ sudo pacman -U --noconfirm --assume-installed owlink '$osrc'/opendrop-*.pkg.tar.
   # not refresh them: -Sy on its own is how partial upgrades happen, and a user
   # who asked to install AirDrop did not ask to move their system's package
   # state. A database that predates the package simply takes the build path.
-  if [[ ! -x "$DISCOVERABLE" ]]; then
+  # An installed driver older than this plugin needs is rebuilt from the pin
+  # too: that is the upgrade the "needs a newer driver" messages point at.
+  if [[ ! -x "$DISCOVERABLE" ]] || ! driver_current; then
     if pacman -Si "$DRIVER_PKG" >/dev/null 2>&1; then
       build="$build
 sudo pacman -S --needed --noconfirm $DRIVER_PKG"
@@ -687,7 +690,7 @@ else
   git clone --quiet $DRIVER_REPO '$src'
 fi
 echo 'Building driver commit $DRIVER_COMMIT'
-git -C '$src' checkout --detach 1af874bebfd6f10f3aa1ec05640e181ba8173219 && makepkg --dir '$src' -si"
+git -C '$src' checkout --detach 4b3daaeec13fa9c9e5d1127c6e2b6dfb5b2ba499 && makepkg --dir '$src' -si"
     fi
   fi
 
@@ -1015,6 +1018,26 @@ require_sender() {
     || die "The Apple-compatible radio is not running, so nobody can be heard and nothing can be sent. Start it with: omdrop on 10m"
 }
 
+# A driver older than 0.5.0 sends one file only. Its usage line is what says
+# so, and asking it is cheaper than keeping a table of driver versions.
+sender_takes_several_files() {
+  "$SENDER" --help 2>&1 | grep -qF '[file ...]'
+}
+
+# Whether the installed sender has everything this plugin asks of it: peer
+# names (driver 0.4.0) and several files per send (0.5.0).
+driver_current() {
+  local usage
+  [[ -x "$SENDER" ]] || return 1
+  usage=$("$SENDER" --help 2>&1)
+  [[ "$usage" == *--names* && "$usage" == *"[file ...]"* ]]
+}
+
+# What a send is of, in a few words: the file's name, or how many there are.
+describe_files() {
+  if (( $# == 1 )); then printf '%s' "${1##*/}"; else printf '%d files' "$#"; fi
+}
+
 # The sender speaks in debug log lines, deliberately: a transfer that goes
 # wrong is a protocol problem and that log is how it gets diagnosed. Somebody
 # sending a photo needs four sentences out of it, so this turns the lines that
@@ -1037,7 +1060,8 @@ narrate_send() {
   done
 }
 
-# Which device the file is going to, left in PEER.
+# Which device the files are going to, left in PEER. Takes the recipient,
+# then the files, which only appear in the commands it suggests.
 #
 # Chosen here rather than left to the sender for two reasons. The sender's
 # name for this is `--mac`, so its refusals ("several peers heard; choose one
@@ -1052,7 +1076,7 @@ narrate_send() {
 # exit 1, "the table is empty", means an empty room.
 PEER=
 choose_peer() {
-  local want=${1,,} target=$2 listing rc rows=() matches=() row lines= quoted by_name=0
+  local want=${1,,} listing rc rows=() matches=() row lines= quoted by_name=0; shift
   # A colon, or a full 12-hex MAC, is an address. Anything else is a device
   # name -- and the test has to be that strict, because device names are often
   # pure hex ("f0011" is one here) and treating such a name as an address
@@ -1092,14 +1116,14 @@ $(printf '%s\n' "$listing" | sed 's/^/  /')"
     die "No device matching \"$want\" was found. See what is nearby:  omdrop peers"
   fi
   if (( ${#matches[@]} > 1 )); then
-    # Each line is the command to run, not a description of one: the file is
+    # Each line is the command to run, not a description of one: the files are
     # already in hand, and the address is six random bytes nobody should have
     # to retype.
-    printf -v quoted '%q' "$target"
+    printf -v quoted ' %q' "$@"
     for row in "${matches[@]}"; do
       local m=${row%%|*} r=${row#*|}; local rssi=${r%%|*} nm=${r#*|}
       lines+="
-  omdrop send --to $m $quoted   (${rssi} dBm${nm:+, $nm})"
+  omdrop send --to $m$quoted   (${rssi} dBm${nm:+, $nm})"
     done
     die "${want:+Several devices match \"$want\"}${want:-Several Apple devices were found}. Choose one:$lines"
   fi
@@ -1109,7 +1133,7 @@ $(printf '%s\n' "$listing" | sed 's/^/  /')"
 }
 
 cmd_send() {
-  local file= to= wait=$DEFAULT_SEND_WAIT verbose=0 pick=0 rc; local -a rest=()
+  local to= wait=$DEFAULT_SEND_WAIT verbose=0 pick=0 rc f; local -a rest=() files=()
   while (( $# )); do
     case "$1" in
       --to)     shift; (( $# )) || die "send --to: the address of a device, as listed by: omdrop peers"; to=$1 ;;
@@ -1117,15 +1141,15 @@ cmd_send() {
       --wait)   shift; (( $# )) || die "send --wait: a number of seconds"; wait=$1 ;;
       --wait=*) wait=${1#--wait=} ;;
       -v|--verbose) verbose=1 ;;
-      # The panel's route: ask for the file in a chooser, after everything
-      # that could refuse the send has been checked, so nobody picks a file
+      # The panel's route: ask for the files in a chooser, after everything
+      # that could refuse the send has been checked, so nobody picks files
       # only to be told the radio is off.
       --pick)   pick=1 ;;
       # A filename may begin with a dash, and the person holding it should not
       # have to know that; `--` is how they say so.
       --)       shift; break ;;
       -*)       die "send: no such option $1" ;;
-      # Collected first, sorted afterwards: which positional is the file and
+      # Collected first, sorted afterwards: which positional is a file and
       # which is the recipient is decided by the filesystem, not by position,
       # so `omdrop send fred photo.jpg` and `omdrop send photo.jpg fred` both
       # work. Someone reaching for this should not have to recall an order.
@@ -1134,34 +1158,63 @@ cmd_send() {
     shift
   done
   rest+=("$@")
-  case ${#rest[@]} in
-    0) ;;
-    1) if [[ -e "${rest[0]}" || -n "$to" ]]; then file=${rest[0]}; else to=${rest[0]}; fi ;;
-    2) if [[ -e "${rest[0]}" && -e "${rest[1]}" ]]; then
-         die "send: one file at a time, but both ${rest[0]} and ${rest[1]} exist"
-       elif [[ -e "${rest[1]}" ]]; then file=${rest[1]}; to=${rest[0]}
-       else file=${rest[0]}; to=${rest[1]}
-       fi ;;
-    *) die "send: one file and one recipient, but ${#rest[@]} were named" ;;
-  esac
-
-  if (( pick )); then
-    (( ${#rest[@]} == 0 )) || die "send --pick: the chooser picks the file, so name only the recipient, with --to"
-    require_sender
-    file=$(pick file "$(send_start_dir)" "Send to ${to:-a nearby device}") || exit $?
-    # Remembered on choosing, not on arriving: the folder is where they
-    # keep things to send, whether or not this one got through.
-    setting_set send_from "$(dirname "$file")"
-    # The first line the panel hears: the chooser has closed with a file, so
-    # the panel can come back and show this send's progress.
-    printf 'Preparing %s...\n' "$(basename "$file")"
+  # With --to, every positional is a file, and one that does not exist is a
+  # typo to report as such. Without it, the one name that is not a file is the
+  # recipient; two such names leave no way to tell a recipient from a typo.
+  if [[ -n "$to" ]]; then
+    files=("${rest[@]}")
+  else
+    local -a absent=()
+    for f in "${rest[@]}"; do
+      if [[ -e "$f" ]]; then files+=("$f"); else absent+=("$f"); fi
+    done
+    case ${#absent[@]} in
+      0) ;;
+      1) to=${absent[0]} ;;
+      *) die "send: none of these is a file, and only one can be the recipient: ${absent[*]}" ;;
+    esac
   fi
 
-  [[ -n "$file" ]] || die "usage: omdrop send [RECIPIENT] FILE [--wait SECONDS]
+  if (( pick )); then
+    (( ${#rest[@]} == 0 )) || die "send --pick: the chooser picks the files, so name only the recipient, with --to"
+    require_sender
+    # NUL-separated, because a filename may hold a newline. Through a file
+    # rather than $(...), which cannot carry a NUL, so the chooser's exit
+    # status still decides.
+    local chosen; chosen=$(mktemp) || die "omdrop could not create a temporary file."
+    pick files "$(send_start_dir)" "Send to ${to:-a nearby device}" > "$chosen"
+    rc=$?
+    mapfile -d '' -t files < "$chosen"
+    rm -f "$chosen"
+    (( rc == 0 )) || exit "$rc"
+    (( ${#files[@]} )) || exit 1
+    # Remembered on choosing, not on arriving: the folder is where they
+    # keep things to send, whether or not these got through.
+    setting_set send_from "$(dirname "${files[0]}")"
+    # The first line the panel hears: the chooser has closed with files, so
+    # the panel can come back and show this send's progress.
+    printf 'Preparing %s...\n' "$(describe_files "${files[@]}")"
+  fi
+
+  (( ${#files[@]} )) || die "usage: omdrop send [RECIPIENT] FILE... [--wait SECONDS]
   RECIPIENT is a device name, as shown by \`omdrop peers -n\`, or part of an address."
-  [[ -e "$file" ]] || die "$file: there is no such file"
-  [[ ! -d "$file" ]] || die "$file: a folder cannot be sent -- send a file, or compress the folder first"
-  [[ -f "$file" && -r "$file" ]] || die "$file: not a file that can be read"
+  local -a names=()
+  local n
+  for f in "${files[@]}"; do
+    [[ -e "$f" ]] || die "$f: there is no such file"
+    [[ ! -d "$f" ]] || die "$f: a folder cannot be sent -- send files, or compress the folder first"
+    [[ -f "$f" && -r "$f" ]] || die "$f: not a file that can be read"
+    # The device stores each file under its name alone, so two files of one
+    # name would arrive as one. Said here, before anyone waits on a device.
+    # A list, not an associative array: a filename such as "@" is not a safe
+    # subscript.
+    for n in "${names[@]}"; do
+      [[ "$n" != "${f##*/}" ]] \
+        || die "Two of these files are called $n, and the device would keep only one. Rename one, or send them separately."
+    done
+    names+=("${f##*/}")
+  done
+
   # Checked here rather than left to the sender, so a typo costs a sentence
   # instead of a polkit prompt and a Python traceback.
   [[ "$wait" =~ ^[0-9]+$ ]] \
@@ -1177,13 +1230,18 @@ cmd_send() {
     [[ "$to" != *$'\n'* ]] || die "send: a recipient is one name or address, not several lines"
   fi
   require_sender
+  # The driver package owns the sender, and a driver older than this plugin
+  # takes one file only. Say so, rather than surface its argparse error.
+  if (( ${#files[@]} > 1 )) && ! sender_takes_several_files; then
+    die "Sending several files at once needs a newer Wi-Fi driver package. Update it with: omdrop install-driver"
+  fi
 
-  choose_peer "$to" "$file"
+  choose_peer "$to" "${files[@]}"
 
   # The name Apple devices already know this computer by. The prompt on their
   # screen should say the same thing whichever way the file is going, and the
   # sender's own default ("Omarchy") is nobody's machine in particular.
-  local cmd=("$SENDER" --name "$(effective_name)" --wait "$wait" --mac "$PEER" -- "$file")
+  local cmd=("$SENDER" --name "$(effective_name)" --wait "$wait" --mac "$PEER" -- "${files[@]}")
 
   if (( verbose )); then
     run_cancellable "${cmd[@]}"

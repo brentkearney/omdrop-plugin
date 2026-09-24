@@ -491,11 +491,11 @@ Panel {
   property string sendingTo: ""
   property string sendingName: ""
   property string sendStatus: ""
-  property bool sendChosen: false    // the chooser answered with a file
+  property bool sendChosen: false    // the chooser answered with files
   property bool sendFailed: false
   property bool sendDone: false
   property bool sendCancelled: false
-  property string sendingFile: ""    // the chosen file's name, from "Preparing …"
+  property string sendingFile: ""    // "photo.jpg" or "3 files", from "Preparing …"
 
   // The CLI stops the sender's whole process group on TERM, so nothing goes
   // on knocking on the device's door after this.
@@ -520,7 +520,7 @@ Panel {
     var named = peers.filter(function(p) { return p.mac === mac })
     sendingTo = mac
     sendingName = named.length ? named[0].name : ""
-    sendStatus = "Choose a file…"
+    sendStatus = "Choose files…"
     sendChosen = false
     sendFailed = false
     sendDone = false
@@ -569,7 +569,7 @@ Panel {
       // A send the person cancelled is not a failure either; the row just
       // goes back to being a row.
       if (root.sendCancelled
-          || (code !== 0 && !root.sendChosen && root.sendStatus === "Choose a file…")) {
+          || (code !== 0 && !root.sendChosen && root.sendStatus === "Choose files…")) {
         root.sendCancelled = false
         root.sendingTo = ""
         root.sendStatus = ""

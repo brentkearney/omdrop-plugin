@@ -42,7 +42,7 @@ Expand **Send to peers**, or press `n` in the panel. If Omdrop is off, this turn
 
 - A radar shows each nearby device as a dot. Brighter and nearer the centre means a stronger signal, not a direction or distance.
 - Devices that answer with a name are listed under the heading.
-- Click a name or any dot, then choose a file. The chooser opens in the folder you last sent from. The row shows progress, and an **×** cancels the send.
+- Click a name or any dot, then choose one or more files. They go as one transfer, so the recipient accepts once. The chooser opens in the folder you last sent from. The row shows progress, and an **×** cancels the send.
 - Named devices ping as the sweep passes them. The speaker in the radar's corner mutes the sound, and Omdrop remembers the setting.
 
 While the section is open, Omdrop keeps asking devices for their names. Asking connects to each device and briefly announces your Apple ID over Bluetooth, so that Contacts Only devices answer. Closing the section stops it.
@@ -64,6 +64,7 @@ omdrop dir ~/Drops
 omdrop limit 30                   # largest transfer, as % of free disk space
 omdrop peers -n                   # nearby devices, with names
 omdrop send ~/photo.jpg MyMac     # by name, or --to part of an address
+omdrop send ~/a.jpg ~/b.pdf MyMac # several files, accepted once
 omdrop send --wait 120 ~/photo.jpg iPhone
 omdrop send --verbose ~/photo.jpg # protocol log, for bug reports
 ```
@@ -106,7 +107,7 @@ sudo pacman -R brcmfmac-awdl-dkms
 
 ## Known limitations
 
-- One file per send.
+- Folders can't be sent. Compress one first.
 - iOS shows a refused Contacts Only transfer as "Waiting..." rather than an error.
 
 ## Contributing

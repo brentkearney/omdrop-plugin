@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Ask the person for a folder or a file, in Nautilus, and print the path.
+"""Ask the person for a folder or files, in Nautilus, and print the paths.
 
-    pick.py folder|file START_DIR TITLE
+    pick.py folder|files START_DIR TITLE
 
-Prints the chosen absolute path and exits 0. Exits 1 when the person cancels,
-and 2 when no chooser can be shown at all, with the reason on stderr.
+Prints the chosen folder's absolute path on one line, or each chosen file's
+absolute path followed by a NUL, since a filename may hold a newline. Exits 0
+with an answer, 1 when the person cancels, and 2 when no chooser can be shown
+at all, with the reason on stderr.
 
 Nautilus first, by calling its portal backend directly. Nautilus 50 implements
 org.freedesktop.impl.portal.FileChooser itself, but Omarchy routes the desktop
@@ -45,18 +47,22 @@ def options(kind, start):
     }
     if kind == "folder":
         opts["directory"] = GLib.Variant("b", True)
+    else:
+        opts["multiple"] = GLib.Variant("b", True)
     if start and os.path.isdir(start):
         # A NUL-terminated byte string: the portal's type for a path.
         opts["current_folder"] = GLib.Variant("ay", os.fsencode(start) + b"\0")
     return opts
 
 
-def path_of(results):
-    uris = results.get("uris") or []
-    if not uris:
-        return None
-    u = urlparse(uris[0])
-    return unquote(u.path) if u.scheme == "file" else None
+def paths_of(results):
+    """The chosen local paths. A remote location has no path to send from."""
+    paths = []
+    for uri in results.get("uris") or []:
+        u = urlparse(uri)
+        if u.scheme == "file":
+            paths.append(unquote(u.path))
+    return paths
 
 
 def hypr_dispatch(lua, *classic):
@@ -127,8 +133,8 @@ def run(bus, dest, handle, start_call, title):
     loop = GLib.MainLoop()
     answer = {}
 
-    def finish(path=None, error=None):
-        answer.update(path=path, error=error)
+    def finish(paths=None, error=None):
+        answer.update(paths=paths, error=error)
         loop.quit()
 
     def stop():
@@ -146,7 +152,7 @@ def run(bus, dest, handle, start_call, title):
     loop.run()
     if answer.get("error"):
         raise answer["error"]
-    return answer.get("path")
+    return answer.get("paths")
 
 
 def via_nautilus(bus, kind, start, title):
@@ -159,7 +165,7 @@ def via_nautilus(bus, kind, start, title):
             except GLib.Error as e:
                 finish(error=e)
                 return
-            finish(path_of(results) if response == 0 else None)
+            finish(paths_of(results) if response == 0 else None)
 
         bus.call(NAUTILUS, PORTAL_PATH, IMPL, "OpenFile",
                  GLib.Variant("(osssa{sv})", (handle, APP_ID, "", title, options(kind, start))),
@@ -176,7 +182,7 @@ def via_portal(bus, kind, start, title):
     def start_call(finish):
         def on_response(_c, _s, _p, _i, _sig, params):
             response, results = params.unpack()
-            finish(path_of(results) if response == 0 else None)
+            finish(paths_of(results) if response == 0 else None)
 
         # Subscribed before the call, at the path the portal will use, so a
         # quick answer cannot arrive before anyone is listening.
@@ -199,13 +205,13 @@ def via_portal(bus, kind, start, title):
 
 
 def main(argv):
-    if len(argv) != 4 or argv[1] not in ("folder", "file"):
-        print("usage: pick.py folder|file START_DIR TITLE", file=sys.stderr)
+    if len(argv) != 4 or argv[1] not in ("folder", "files"):
+        print("usage: pick.py folder|files START_DIR TITLE", file=sys.stderr)
         return 2
     kind, start, title = argv[1], argv[2], argv[3]
     bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
     try:
-        path = via_nautilus(bus, kind, start, title)
+        paths = via_nautilus(bus, kind, start, title)
     except GLib.Error as e:
         # Absent or not activatable. Anything else (a Nautilus that crashed
         # mid-dialog) is not a reason to pop a second chooser at them.
@@ -214,13 +220,16 @@ def main(argv):
             print(f"The file chooser failed: {e.message}", file=sys.stderr)
             return 2
         try:
-            path = via_portal(bus, kind, start, title)
+            paths = via_portal(bus, kind, start, title)
         except GLib.Error as e2:
             print(f"No file chooser is available: {e2.message}", file=sys.stderr)
             return 2
-    if not path:
+    if not paths:
         return 1
-    print(path)
+    if kind == "folder":
+        print(paths[0])
+    else:
+        sys.stdout.write("".join(p + "\0" for p in paths))
     return 0
 
 

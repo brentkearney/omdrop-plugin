@@ -57,7 +57,7 @@ class SenderFixture(unittest.TestCase):
         self.sender = self.command(
             "send-to-peer",
             """#!/bin/sh
-[ "$1" = --help ] && { echo "  -n, --names"; exit 0; }
+[ "$1" = --help ] && { printf '%s\\n' "${SENDER_USAGE-  -n, --names  [file ...]}"; exit 0; }
 out="$CAPTURE"
 [ "$1" = --list ] && out="$CAPTURE_LIST"
 : > "$out"
@@ -205,6 +205,60 @@ class SendCommandTests(SenderFixture):
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(self.capture.exists())
 
+    def second_file(self, name="notes.txt"):
+        other = Path(self.tmp.name) / "elsewhere"
+        other.mkdir(exist_ok=True)
+        path = other / name
+        path.write_text("notes\n")
+        return path
+
+    def test_several_files_go_to_the_sender_as_one_transfer(self):
+        notes = self.second_file()
+
+        result = self.run_omdrop("send", str(self.file), str(notes))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = self.sender_args()
+        self.assertEqual(args[args.index("--") + 1:], [str(self.file), str(notes)])
+
+    def test_the_recipient_may_sit_anywhere_among_the_files(self):
+        self.env["PEER_LIST"] = THREE_PEERS
+        notes = self.second_file()
+
+        result = self.run_omdrop("send", str(self.file), "6c:58", str(notes))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = self.sender_args()
+        self.assertEqual(args[args.index("--mac") + 1], "e2:9d:03:6c:58:23")
+        self.assertEqual(args[args.index("--") + 1:], [str(self.file), str(notes)])
+
+    def test_two_names_that_are_not_files_are_refused(self):
+        result = self.run_omdrop("send", str(self.file), "fred", "typo.jpg")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("typo.jpg", result.stderr)
+        self.assertFalse(self.capture.exists())
+
+    def test_two_files_of_one_name_are_refused_before_anything_is_sent(self):
+        twin = self.second_file(self.file.name)
+
+        result = self.run_omdrop("send", str(self.file), str(twin))
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("photo.jpg", result.stderr)
+        self.assertFalse(self.capture.exists())
+        self.assertFalse(self.capture_list.exists(), "a device was asked before refusing")
+
+    def test_a_one_file_driver_is_told_to_update_for_several(self):
+        self.env["SENDER_USAGE"] = "  -n, --names  [file]"
+
+        several = self.run_omdrop("send", str(self.file), str(self.second_file()))
+        one = self.run_omdrop("send", str(self.file))
+
+        self.assertNotEqual(several.returncode, 0)
+        self.assertIn("omdrop install-driver", several.stderr)
+        self.assertEqual(one.returncode, 0, one.stderr)
+
     def test_send_says_what_to_do_when_the_radio_is_down(self):
         self.env["RADIO"] = "down"
 
@@ -309,7 +363,9 @@ class SendPickTests(SenderFixture):
         picker = self.command("picker", """#!/bin/sh
 printf '%s\\n' "$2" > "$OPENED_AT"
 [ -n "$PICK_ANSWER" ] || exit 1
-printf '%s\\n' "$PICK_ANSWER"
+# One path per line here, NUL-terminated there, as pick.py answers.
+printf '%s\\n' "$PICK_ANSWER" | tr '\\n' '\\0'
+[ -z "$PICK_ANSWER_2" ] || printf '%s\\0' "$PICK_ANSWER_2"
 """)
         self.env.update(OMDROP_PICKER=str(picker), OPENED_AT=str(self.opened_at))
 
@@ -335,6 +391,20 @@ printf '%s\\n' "$PICK_ANSWER"
         photos.rmdir()
         self.pick_and_send(self.file)
         self.assertEqual(self.opened_at.read_text().strip(), str(self.downloads))
+
+    def test_every_chosen_file_is_sent_together(self):
+        # A newline in a name is what the NUL separator is for.
+        odd = Path(self.tmp.name) / "two\nlines.txt"
+        odd.write_text("x")
+        self.env["PICK_ANSWER"] = str(self.file)
+        self.env["PICK_ANSWER_2"] = str(odd)
+
+        result = self.run_omdrop("send", "--pick", "--to", "6c:58")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Preparing 2 files...", result.stdout)
+        args = self.capture.read_text().split("\n--\n", 1)[1]
+        self.assertEqual(args, f"{self.file}\n{odd}\n")
 
     def test_a_cancelled_chooser_sends_nothing_and_says_nothing(self):
         self.env["PICK_ANSWER"] = ""
