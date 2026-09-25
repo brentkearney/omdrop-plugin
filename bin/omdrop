@@ -54,7 +54,7 @@ PROJ="$(cd "$(dirname "$SELF")/.." && pwd)"
 # A fallback that silently substitutes for the real value is the same class of
 # defect as a status line reporting a state that was never entered, so this one
 # says when it is guessing, and says when the two disagree.
-VERSION_FALLBACK=0.8.3
+VERSION_FALLBACK=0.8.4
 omdrop_version() {
   local dir manifest version= real
   real=$(readlink -f "$0" 2>/dev/null) || real="$0"
@@ -381,12 +381,24 @@ PY
 # and pretending otherwise would turn "set up" into a promise we break at the
 # first transfer. Missing pieces get named, never guessed at and never faked.
 
-# The clone we were run from -- it carries the unit template and the receiver.
-# $0 rather than $SELF, for the reason omdrop_version gives: during development
-# the plugin's bin/omdrop is a symlink into a source checkout, and resolving it
-# lands beside the script instead of beside the files that shipped with it.
+# The plugin we were run from -- it carries the unit template and the receiver.
+# Follow $0 one symlink at a time and stop at the first directory whose parent
+# holds manifest.json. Not straight to readlink -f: during development the
+# plugin's bin/omdrop can itself be a symlink into a source checkout, and
+# resolving all the way lands beside the script instead of beside the files
+# that shipped with it. Not $0 alone either: through the ~/.local/bin/omdrop
+# symlink that setup creates, that lands in ~/.local (issue 12).
 plugin_dir() {
-  cd "$(dirname "$0")/.." 2>/dev/null && pwd
+  local path="$0" dir hops=0 next
+  while (( hops++ < 16 )); do
+    dir=$(cd "$(dirname "$path")/.." 2>/dev/null && pwd) || return 1
+    [[ -r "$dir/manifest.json" ]] && { printf '%s\n' "$dir"; return 0; }
+    [[ -L "$path" ]] || return 1
+    next=$(readlink "$path") || return 1
+    [[ "$next" == /* ]] || next="$(dirname "$path")/$next"
+    path=$next
+  done
+  return 1
 }
 
 opendrop_installed() { python3 -c 'import opendrop' >/dev/null 2>&1; }

@@ -20,9 +20,14 @@
 Description=AirDrop receiver over firmware-native AWDL (awdl0)
 Documentation=file:@PLUGIN_DIR@/README.md
 # awdl0 is created by the root-side control plane; wait for it, do not create it.
-After=sys-subsystem-net-devices-awdl0.device
-BindsTo=sys-subsystem-net-devices-awdl0.device
-ConditionPathExists=/sys/class/net/awdl0
+# No After=/BindsTo= on sys-subsystem-net-devices-awdl0.device: awdl0 appears
+# long after the user manager starts, and on some machines that manager never
+# activates the device unit, so the start waited on it until it timed out and
+# failed with result 'dependency' (issue 12). The link-local wait below does
+# the job that dependency was for. An assert, not a condition: a condition
+# that fails skips the unit and reports success, and `omdrop on` would then
+# announce a receiver that is not running.
+AssertPathExists=/sys/class/net/awdl0
 
 [Service]
 Type=simple
