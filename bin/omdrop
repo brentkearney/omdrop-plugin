@@ -54,7 +54,7 @@ PROJ="$(cd "$(dirname "$SELF")/.." && pwd)"
 # A fallback that silently substitutes for the real value is the same class of
 # defect as a status line reporting a state that was never entered, so this one
 # says when it is guessing, and says when the two disagree.
-VERSION_FALLBACK=0.8.1
+VERSION_FALLBACK=0.8.2
 omdrop_version() {
   local dir manifest version= real
   real=$(readlink -f "$0" 2>/dev/null) || real="$0"
@@ -617,7 +617,11 @@ DRIVER_PKG=brcmfmac-awdl-dkms
 # checkout below is detached at this SHA and the build only runs if it
 # succeeded. Bump it, in the same commit, whenever the plugin needs a newer
 # driver: the full 40 characters, because a short SHA is not a pin.
-DRIVER_COMMIT=4b3daaeec13fa9c9e5d1127c6e2b6dfb5b2ba499
+DRIVER_COMMIT=4f4e95e93d2ba3af23af408e8748e1f8e8aabc40
+# The package version that commit builds. install-driver rebuilds any older
+# installed driver: a fix inside the helper, such as 0.5.1's, changes nothing
+# a feature probe could see.
+DRIVER_VERSION=0.5.1
 
 # The AirDrop support library, pinned the same way and for a stronger reason:
 # the receiver imports opendrop and executes it, so its code is part of this
@@ -698,7 +702,7 @@ else
   git clone --quiet $DRIVER_REPO '$src'
 fi
 echo 'Building driver commit $DRIVER_COMMIT'
-git -C '$src' checkout --detach 4b3daaeec13fa9c9e5d1127c6e2b6dfb5b2ba499 && makepkg --dir '$src' -si"
+git -C '$src' checkout --detach 4f4e95e93d2ba3af23af408e8748e1f8e8aabc40 && makepkg --dir '$src' -si"
     fi
   fi
 
@@ -1032,13 +1036,13 @@ sender_takes_several_files() {
   "$SENDER" --help 2>&1 | grep -qF '[file ...]'
 }
 
-# Whether the installed sender has everything this plugin asks of it: peer
-# names (driver 0.4.0) and several files per send (0.5.0).
+# Whether the installed driver package is at least the one this plugin pins.
+# Read from pacman, because a helper fix is invisible from outside the helper.
 driver_current() {
-  local usage
-  [[ -x "$SENDER" ]] || return 1
-  usage=$("$SENDER" --help 2>&1)
-  [[ "$usage" == *--names* && "$usage" == *"[file ...]"* ]]
+  local installed
+  installed=$(pacman -Q "$DRIVER_PKG" 2>/dev/null) || return 1
+  installed=${installed##* }
+  (( $(vercmp "${installed%-*}" "$DRIVER_VERSION") >= 0 ))
 }
 
 # What a send is of, in a few words: the file's name, or how many there are.

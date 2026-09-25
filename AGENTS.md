@@ -29,7 +29,8 @@ package, so the driver is released first and the pin moves with it:
    tagging `vX.Y.Z`.
 2. Update **both** driver pin sites in `bin/omdrop`: `DRIVER_COMMIT=` and the
    bare SHA inside the build script. `tests/test_pinned_dependencies.py`
-   requires full 40-character SHAs used literally.
+   requires full 40-character SHAs used literally. Set `DRIVER_VERSION=` to
+   that commit's `pkgver`: `install-driver` rebuilds any older installed driver.
 3. Bump `manifest.json`.
 4. Retarget the marketplace verification issue.
 
