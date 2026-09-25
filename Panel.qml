@@ -384,6 +384,34 @@ Panel {
     return list
   }
 
+  // The rows under the heading, kept in place across polls. `peers` is a new
+  // array on every listing (every 2 s) and every name lookup, and a Repeater
+  // over an array rebuilds all its rows on each one: a click whose press and
+  // release straddled a rebuild went to a row that no longer existed, so it
+  // did nothing but take the tooltip with it. Keyed by address, as the radar's
+  // dots are, a row is only created when its device arrives and only removed
+  // when it leaves; a name that changes relabels it, and rows keep the order
+  // they arrived in rather than shuffling under the pointer.
+  ListModel { id: peerRows }
+  onNamedPeersChanged: {
+    var want = {}
+    for (var i = 0; i < namedPeers.length; i++)
+      want[namedPeers[i].mac] = namedPeers[i].name || ""
+    for (var j = peerRows.count - 1; j >= 0; j--) {
+      var mac = peerRows.get(j).mac
+      if (!(mac in want)) {
+        peerRows.remove(j)
+      } else {
+        if (peerRows.get(j).name !== want[mac]) peerRows.setProperty(j, "name", want[mac])
+        delete want[mac]
+      }
+    }
+    for (var k = 0; k < namedPeers.length; k++) {
+      var p = namedPeers[k]
+      if (p.mac in want) peerRows.append({ mac: p.mac, name: want[p.mac] })
+    }
+  }
+
   function mergePeers(list) {
     var out = []
     for (var i = 0; i < list.length; i++) {
@@ -404,9 +432,9 @@ Panel {
     mergePeers(peers)
   }
 
-  // A row flashes once, the first time its device appears in the list. The
-  // list is rebuilt on every poll, so "first time" has to be remembered here
-  // rather than inferred from the row being created.
+  // A row flashes once, the first time its device appears in the list. A
+  // device that leaves and comes back gets a new row, so "first time" has to
+  // be remembered here rather than inferred from the row being created.
   function claimFlash(mac) {
     if (flashedMacs[mac]) return false
     var f = Object.assign({}, flashedMacs)
@@ -1027,11 +1055,12 @@ Panel {
             // The devices that can be sent to, first under the heading, where a
             // new one is seen the moment it arrives.
             Repeater {
-              model: root.namedPeers
+              model: peerRows
               delegate: PeerRow {
-                required property var modelData
+                required property string mac
+                required property string name
                 width: radarColumn.width
-                peer: modelData
+                peer: ({ mac: mac, name: name })
               }
             }
 
