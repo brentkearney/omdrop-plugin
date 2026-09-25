@@ -54,7 +54,7 @@ PROJ="$(cd "$(dirname "$SELF")/.." && pwd)"
 # A fallback that silently substitutes for the real value is the same class of
 # defect as a status line reporting a state that was never entered, so this one
 # says when it is guessing, and says when the two disagree.
-VERSION_FALLBACK=0.9.1
+VERSION_FALLBACK=0.9.2
 omdrop_version() {
   local dir manifest version= real
   real=$(readlink -f "$0" 2>/dev/null) || real="$0"
@@ -709,11 +709,11 @@ DRIVER_PKG=brcmfmac-awdl-dkms
 # checkout below is detached at this SHA and the build only runs if it
 # succeeded. Bump it, in the same commit, whenever the plugin needs a newer
 # driver: the full 40 characters, because a short SHA is not a pin.
-DRIVER_COMMIT=ab9f9ec6c792300ce16c2d9a8335a33161d56b79
+DRIVER_COMMIT=a24e502561d73fc96619f7594543fd061f77e056
 # The package version that commit builds. install-driver rebuilds any older
 # installed driver: a fix inside the helper, such as 0.5.1's, changes nothing
 # a feature probe could see.
-DRIVER_VERSION=0.6.1
+DRIVER_VERSION=0.6.2
 
 cmd_install_driver() {
   local self_q
@@ -772,7 +772,7 @@ else
   git clone --quiet $DRIVER_REPO '$src'
 fi
 echo 'Building driver commit $DRIVER_COMMIT'
-git -C '$src' checkout --detach ab9f9ec6c792300ce16c2d9a8335a33161d56b79 && makepkg --dir '$src' -si"
+git -C '$src' checkout --detach a24e502561d73fc96619f7594543fd061f77e056 && makepkg --dir '$src' -si"
     fi
   fi
 
