@@ -40,9 +40,10 @@ WorkingDirectory=@PLUGIN_DIR@
 # recovered, but SYNs arriving in that gap hit nothing. Wait for the port to
 # clear rather than racing for it.
 ExecStartPre=/bin/sh -c 'for i in $(seq 1 40); do ss -Hltn 2>/dev/null | grep -q ":8771 " || exit 0; sleep 0.25; done; echo "port 8771 still busy after 10s" >&2; exit 1'
-# awdl0 exists a moment before it carries its link-local, and opendrop refuses
-# to start without one ("Make sure that `owl` is running"). This unit once
-# burned three restarts on that gap and gave up. Wait for the address.
+# awdl0 exists a moment before it carries its link-local, and the receiver
+# refuses to start without one (under opendrop: "Make sure that `owl` is
+# running"). This unit once burned three restarts on that gap and gave up.
+# Wait for the address.
 ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do ip -6 addr show dev awdl0 scope link 2>/dev/null | grep -q inet6 && exit 0; sleep 0.5; done; echo "awdl0 has no link-local after 30s" >&2; exit 1'
 ExecStart=/usr/bin/python3 @PLUGIN_DIR@/bin/airdrop-serve.py --iface awdl0 --port 8771
 Restart=on-failure

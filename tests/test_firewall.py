@@ -112,7 +112,7 @@ printf '%s' "$1" > "$CAPTURE"
         # Last, so sudo is authenticated by the package work ahead of it
         # rather than prompting a second time.
         self.assertIn("firewall install", command)
-        self.assertLess(command.index("makepkg"), command.index("firewall install"))
+        self.assertLess(command.index("sudo pacman"), command.index("firewall install"))
 
 
 if __name__ == "__main__":

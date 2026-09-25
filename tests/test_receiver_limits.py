@@ -249,14 +249,14 @@ class ReadDeadlineTests(unittest.TestCase):
     def test_handler_sets_an_idle_timeout_on_each_accepted_socket(self):
         source = SERVE.read_text()
         start = source.index("class Handler(")
-        end = source.index("\n\n# sharingd opens several connections", start)
+        end = source.index("\n# ---", start)
 
         class BaseHandler:
             def setup(self):
                 self.connection = self.request
 
         namespace = {
-            "od_server": types.SimpleNamespace(AirDropServerHandler=BaseHandler),
+            "BaseHTTPRequestHandler": BaseHandler,
             "READ_IDLE_TIMEOUT_SECONDS": 30,
         }
         exec(source[start:end], namespace)

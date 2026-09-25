@@ -41,5 +41,4 @@ commenting — only opening or editing runs the validation workflow. The target
 commit must equal current repository HEAD, so any push to `main` while a request
 is open invalidates it and the bot re-labels it `needs-fixes`.
 
-Leave the standard-installation acknowledgment unchecked: first use builds the
-driver and the AUR `opendrop` recipe in a terminal, which is manual setup.
+Leave the standard-installation acknowledgment unchecked: first use builds the driver and installs `python-libarchive-c` with `pacman` in a terminal, which is manual setup.

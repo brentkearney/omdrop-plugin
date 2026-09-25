@@ -20,7 +20,7 @@ Answer yes when it asks to enable the plugin. The icon, a triangle dropping into
 
 On first use, the panel opens a terminal that asks for your password to:
 
-- Build and install the driver and the `opendrop` AirDrop library. Both are pinned to exact commits, and `makepkg` verifies the library's source checksum. The library is installed with `--assume-installed owlink`, because Omdrop uses the firmware's AWDL and never runs that daemon.
+- Build and install the driver, pinned to an exact commit, and install `python-libarchive-c` from the official Arch repositories if it is missing. It is the receiver's only library outside Python's standard library.
 - Add one firewall rule: TCP 8771 on `awdl0`, from IPv6 link-local addresses only.
 
 First use also installs the `omdrop` command at `~/.local/bin/omdrop`. To get it straight away, run `omdrop setup`. Run `omdrop --version` to include the version in bug reports.

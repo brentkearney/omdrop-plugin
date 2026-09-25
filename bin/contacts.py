@@ -13,7 +13,7 @@ transfer presents two things, measured from real transfers on 2026-09-18:
 
 So we can answer "do I know this person" with the evidence a Mac uses, and we
 need nothing from Apple to do it: verifying their signature requires only
-Apple's public root, which opendrop already ships.
+Apple's public root, which this plugin ships in share/certs.
 
 Three checks, and all three matter:
 
@@ -42,6 +42,7 @@ CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "omd
 KNOWN_SENDERS = CONFIG / "known-senders"
 APPLE_ISSUER_CN = "Apple Application Integration Certification Authority"
 CN_PREFIX = "com.apple.idms.appleid.prd."
+APPLE_ROOT_CA = Path(__file__).resolve().parent.parent / "share" / "certs" / "apple_root_ca.pem"
 
 # Outcomes. The caller turns these into an HTTP answer and a log line; keeping
 # them apart from the transport makes the policy testable on its own.
@@ -63,15 +64,8 @@ WHY = {
 
 
 def apple_root_ca():
-    """Apple's public root, as shipped by opendrop. Public; no account needed."""
-    try:
-        from importlib.resources import files
-        path = files("opendrop") / "certs" / "apple_root_ca.pem"
-        if path.is_file():
-            return str(path)
-    except (ImportError, ModuleNotFoundError, AttributeError):
-        pass
-    return None
+    """Apple's public root, shipped with this plugin. Public; no account needed."""
+    return str(APPLE_ROOT_CA) if APPLE_ROOT_CA.is_file() else None
 
 
 def normalize(entry):

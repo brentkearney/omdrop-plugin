@@ -1,7 +1,6 @@
 import json
 import os
 import subprocess
-import sys
 import tempfile
 import time
 import unittest
@@ -82,17 +81,6 @@ exit "${SENDER_RC:-0}"
             """#!/bin/sh
 [ "${RADIO:-up}" = up ] || exit 0
 echo "    inet6 fe80::1c9a:4bff:fe33:1/64 scope link"
-""",
-        )
-        # Everything except the "is opendrop installed" probe is real python:
-        # the name the device is told comes from config.toml, parsed by it.
-        self.command(
-            "python3",
-            f"""#!/bin/sh
-case "$*" in
-  *"import opendrop"*) exit "${{OPENDROP_RC:-0}}" ;;
-esac
-exec {sys.executable} "$@"
 """,
         )
 

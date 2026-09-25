@@ -21,7 +21,7 @@ SERVE = ROOT / "bin" / "airdrop-serve.py"
 
 
 def port_is_bindable():
-    """A wildcard bind on the port the receiver wants, as opendrop does it."""
+    """A port that is free on the IPv6 wildcard, where the receiver binds."""
     probe = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
     probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
@@ -39,7 +39,7 @@ class SessionResetTests(unittest.TestCase):
         # parsing: the class is the unit under test here.
         source = SERVE.read_text()
         start = source.index("class ThreadingHTTPServerV6")
-        body = source[start:source.index("\nclass NoZeroconf")]
+        body = source[start:source.index("\nKIB = 1024")]
         namespace = {}
         exec("import logging, socket, struct, sys\n"
              "from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler\n"
@@ -107,7 +107,7 @@ class BusyPortTests(unittest.TestCase):
         self.assertNotIn(f"[::]:{port + 1}", waited, waited)
 
         holder.close()
-        served = self.read_until(proc, "Starting HTTPS server", 30)
+        served = self.read_until(proc, "receiving into", 30)
         self.assertIn(f"]:{port},", served, served)
         self.assertIsNone(proc.poll(), served)
 

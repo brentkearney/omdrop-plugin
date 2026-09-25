@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """Serve AirDrop's HTTPS endpoints (/Discover, /Ask, /Upload) on awdl0.
 
-OpenDrop's receiver, minus its announcer: the driver package's radio helper
-hand-builds the AWDL service announcements that actually reach the Macs (an
-ordinary multicast rarely makes it to the air; its 40-frame bursts do), so
-this serves under the identity that helper advertises -- instance
-<awdl0 MAC hex>, host <awdl host>.local, port 8771 -- and registers nothing
-over mDNS unless --announce is given.
+The receiving half only: the driver package's radio helper hand-builds the
+AWDL service announcements that actually reach the Macs (an ordinary
+multicast rarely makes it to the air; its 40-frame bursts do), so this serves
+under the identity that helper advertises -- instance <awdl0 MAC hex>, port
+8771 -- and registers nothing over mDNS itself.
 
 Runs as the invoking user, never root: it needs no privilege, and received
 files belong to the user without a chown.
 """
 import argparse
+import errno
 import io
+import ipaddress
 import json
 import logging
 import socket
@@ -24,6 +25,7 @@ import signal
 import ssl
 import stat as stat_mod
 import struct
+import subprocess
 import sys
 import tempfile
 import threading
@@ -32,14 +34,10 @@ import unicodedata
 import zlib
 
 import libarchive
-from http.server import ThreadingHTTPServer
-
-import opendrop.server as od_server
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import contacts  # noqa: E402  -- sibling module, found via the line above
-from opendrop.config import AirDropConfig
-from opendrop.server import AirDropServer
 
 
 # Path separators, NUL, control characters (Cc) and format characters (Cf:
@@ -57,27 +55,6 @@ CONFIG_PATH = os.path.join(os.environ.get('XDG_CONFIG_HOME') or os.path.join(pwd
 CONFIG_KEYS = ('name', 'model', 'download_dir', 'max_receive_percent')
 STRING_CONFIG_KEYS = ('name', 'model', 'download_dir')
 DEFAULT_MAX_RECEIVE_PERCENT = 30
-
-
-def awdl_host():
-    """The host label this machine answers to on AWDL, without a trailing
-    '.local'. The announcer, the mDNS responder and this receiver must derive
-    it identically: a Mac that resolves a name nobody answers gets a tile it
-    cannot upload to. An explicit override wins, then the system-wide file the
-    driver package writes, then the short hostname -- lowercased and reduced to
-    the characters a DNS label may carry, because a label with a capital or an
-    underscore in it will not round-trip."""
-    override = os.environ.get('OMDROP_AWDL_HOST')
-    if not override:
-        try:
-            with open('/etc/omdrop/awdl-host') as f:
-                override = f.read().strip()
-        except OSError:
-            override = ''
-    if override:
-        return override.rstrip('.').removesuffix('.local')
-    label = re.sub(r'[^a-z0-9-]', '', socket.gethostname().split('.')[0].lower()).strip('-')
-    return f'{label}-awdl' if label else 'omdrop-awdl'
 
 
 def default_receiver_name():
@@ -155,17 +132,14 @@ ap.add_argument('--name', default=None,
                 help='ReceiverComputerName: the label under the tile in the Mac sheet (config: name)')
 ap.add_argument('--model', default=None,
                 help='ReceiverModelName: Apple model identifier; picks the device glyph the sheet draws (config: model)')
-ap.add_argument('--host', default=awdl_host(),
-                help='AWDL host label, without ".local"; must match what the radio helper advertises')
 ap.add_argument('--keys', default=os.path.join(pwd.getpwuid(os.getuid()).pw_dir, '.opendrop'),
-                help='opendrop dir holding keys/certificate.pem and keys/key.pem')
+                help='identity dir holding keys/certificate.pem and keys/key.pem (a self-signed '
+                     'pair is created if absent) and, optionally, keys/validation_record.cms')
 ap.add_argument('--outdir', default=None,
                 help='where received files go (config: download_dir)')
 ap.add_argument('--max-receive-percent', type=int, default=None,
                 help='maximum transfer size as a percentage of currently free output disk space')
 ap.add_argument('--config', default=CONFIG_PATH, help='config file path')
-ap.add_argument('--announce', action='store_true',
-                help='also register the service over mDNS (zeroconf)')
 args = ap.parse_args()
 
 _cfg = load_config(args.config)
@@ -180,15 +154,19 @@ MAX_RECEIVE_PERCENT = validate_receive_percent(
 
 logging.basicConfig(level=logging.DEBUG, stream=sys.stdout,
                     format='%(asctime)s %(levelname)s %(name)s: %(message)s')
-logging.getLogger('zeroconf').setLevel(logging.INFO)
 
 with open(f'/sys/class/net/{args.iface}/address') as f:
     sid = f.read().strip().replace(':', '')
 
 
+# Threaded because sharingd opens several connections at once; a
+# single-threaded server would hold /Discover behind a stalled one.
 class ThreadingHTTPServerV6(ThreadingHTTPServer):
     address_family = socket.AF_INET6
     daemon_threads = True
+    # Bound without SO_REUSEADDR, as this receiver always has been: a port
+    # still held is waited out by bind_server() below.
+    allow_reuse_address = False
 
     # A connection that opens and then carries no request is the signature of a
     # sender that gave up or a TLS handshake we lost -- invisible in the
@@ -233,12 +211,6 @@ class ThreadingHTTPServerV6(ThreadingHTTPServer):
         if isinstance(sys.exc_info()[1], ConnectionResetError):
             return
         super().handle_error(request, client_address)
-
-
-class NoZeroconf:
-    def __init__(self, *a, **k): pass
-    def register_service(self, *a, **k): pass
-    def unregister_all_services(self): pass
 
 
 KIB = 1024
@@ -618,15 +590,28 @@ def store_link(url, dest):
     return name
 
 
-class Handler(od_server.AirDropServerHandler):
-    """sharingd (AirDrop/1.0, macOS 15) differs from what OpenDrop expects:
+# ReceiverMediaCapabilities, sent in both the Discover and the Ask answer:
+# version 1 and no codecs or containers, which makes the sender convert to
+# the legacy formats (JPEG rather than HEIF). The key's presence is the point.
+MEDIA_CAPABILITIES = json.dumps({'Version': 1}).encode()
+
+
+class Handler(BaseHTTPRequestHandler):
+    """AirDrop's receiving endpoints, as sharingd (AirDrop/1.0, macOS 15) and
+    iOS actually send them:
     - /Discover and /Ask arrive `Transfer-Encoding: chunked` with no
-      Content-Length; OpenDrop reads int(Content-Length). Dechunk first.
-      rfile is restored afterwards: Ask and Upload must share one TLS
-      connection, and a swapped-out rfile made the keep-alive loop see EOF.
-    - /Upload arrives as application/x-dvzip (OpenDrop accepts only x-cpio and
-      answers 406, which the sender reports as a failed transfer). Decode it.
+      Content-Length, so their bodies go through the same bounded reader as
+      an upload's, never int(Content-Length). Each body is read from rfile
+      exactly once, in place: Ask and Upload share one TLS connection, and a
+      swapped-out rfile once made the keep-alive loop see EOF.
+    - /Upload arrives as application/x-dvzip, not the plain x-cpio older
+      AirDrop implementations take (answering 406 to it makes the sender
+      report a failed transfer). Decode it.
+    Anything else POSTed is answered 400, GET and HEAD a bare 200, and every
+    other method the stock 501.
     """
+
+    protocol_version = 'HTTP/1.1'
 
     def setup(self):
         # Applies to request headers and every body read. A peer that stops
@@ -650,7 +635,22 @@ class Handler(od_server.AirDropServerHandler):
         self.end_headers()
         self.close_connection = True
 
+    def answer(self, body):
+        self.send_response(200)
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/html')
+        self.end_headers()
+
+    def do_GET(self):
+        self.answer(b'\n')
+
     def do_POST(self):
+        logging.debug('POST %s, headers:\n%s', self.path, self.headers)
         if PEERCERT_DIR:
             # Research instrumentation must never be able to fail a transfer.
             # It did once: a capture bug raised inside do_POST and killed three
@@ -660,28 +660,27 @@ class Handler(od_server.AirDropServerHandler):
                 _capture_peer_cert(self.connection)
             except Exception:
                 logging.exception('peer certificate capture failed; continuing')
-        if self.path in ('/Discover', '/Ask'):
-            try:
-                body = read_small_body(self.rfile, self.headers)
-            except socket.timeout:
-                self.reject(408, 'request body read timed out')
-                return
-            except RequestBodyError as e:
-                self.reject(e.status, str(e))
-                return
-            orig = self.rfile
-            self.rfile = io.BytesIO(body)
-            if 'Transfer-Encoding' in self.headers:
-                del self.headers['Transfer-Encoding']
-            self.headers['Content-Length'] = str(len(body))
-            logging.debug('buffered bounded %d-byte body for %s',
-                          len(body), self.path)
-            try:
-                super().do_POST()
-            finally:
-                self.rfile = orig
+        if self.path == '/Upload':
+            self.handle_upload()
             return
-        super().do_POST()
+        if self.path not in ('/Discover', '/Ask'):
+            self.send_response(400)
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return
+        try:
+            body = read_small_body(self.rfile, self.headers)
+        except socket.timeout:
+            self.reject(408, 'request body read timed out')
+            return
+        except RequestBodyError as e:
+            self.reject(e.status, str(e))
+            return
+        logging.debug('buffered bounded %d-byte body for %s', len(body), self.path)
+        if self.path == '/Discover':
+            self.handle_discover(body)
+        else:
+            self.handle_ask(body)
 
     # Contacts Only should mean a stranger does not see this machine at all,
     # which is what Apple's mode does and what the name implies. Until now it
@@ -700,10 +699,8 @@ class Handler(od_server.AirDropServerHandler):
     #
     # Silence rather than an error: a 403 here would tell the stranger the
     # machine is there, which is the thing being hidden.
-    def handle_discover(self):
+    def handle_discover(self, body):
         if contacts.visibility() == 'contacts':
-            body = self.rfile.read(int(self.headers.get('Content-Length', '0')))
-            self.rfile = io.BytesIO(body)
             try:
                 record = (plistlib.loads(body) or {}).get('SenderRecordData')
             except Exception:
@@ -716,19 +713,30 @@ class Handler(od_server.AirDropServerHandler):
                 self.send_header('Content-Length', '0')
                 self.end_headers()
                 return
-        super().handle_discover()
+        write_debug(body, 'receive_discover_request.plist')
+        answer = {
+            'ReceiverMediaCapabilities': MEDIA_CAPABILITIES,
+            'ReceiverComputerName': NAME,
+            'ReceiverModelName': MODEL,
+        }
+        # The Apple ID validation record, when this machine has one, is what
+        # lets a Contacts Only sender recognise us.
+        if RECORD_DATA:
+            answer['ReceiverRecordData'] = RECORD_DATA
+        resp = plistlib.dumps(answer, fmt=plistlib.FMT_BINARY)
+        write_debug(resp, 'receive_discover_response.plist')
+        self.answer(resp)
 
     # 2026-09-12, iPhone on iOS 26, two link transfers: /Discover 200, /Ask 200
     # for a 108-byte `x-com.webloc`, then NO /Upload at all while the phone's
-    # UI reported "Sent". OpenDrop answers an Ask with the two name keys only;
-    # its own Discover answer (and a Mac's, 043402Z) also carries
-    # ReceiverMediaCapabilities, which is how the sender learns what the
-    # receiver will take. Answer the Ask with the same three keys and log what
-    # was asked for: that log line is what separates "the sender never
+    # UI reported "Sent". The Ask was answered with the two name keys only
+    # (OpenDrop's answer); the Discover answer (and a Mac's, 043402Z) also
+    # carries ReceiverMediaCapabilities, which is how the sender learns what
+    # the receiver will take. Answer the Ask with the same three keys and log
+    # what was asked for: that log line is what separates "the sender never
     # uploaded" from "the upload failed on our side".
-    def handle_ask(self):
-        body = self.rfile.read(int(self.headers.get('Content-Length', '0')))
-        od_server.AirDropUtil.write_debug(self.config, body, 'receive_ask_request.plist')
+    def handle_ask(self, body):
+        write_debug(body, 'receive_ask_request.plist')
         try:
             ask = plistlib.loads(body)
         except Exception as e:
@@ -786,15 +794,12 @@ class Handler(od_server.AirDropServerHandler):
                 stored = store_link(item, DEST)
                 logging.info('link stored as %s -> %s', stored, item)
         resp = plistlib.dumps({
-            # Empty capabilities = "send me the legacy formats", as OpenDrop's
-            # Discover answer does; the key's presence is the point.
-            'ReceiverMediaCapabilities': json.dumps({'Version': 1}).encode(),
-            'ReceiverComputerName': self.config.computer_name,
-            'ReceiverModelName': self.config.computer_model,
+            'ReceiverMediaCapabilities': MEDIA_CAPABILITIES,
+            'ReceiverComputerName': NAME,
+            'ReceiverModelName': MODEL,
         }, fmt=plistlib.FMT_BINARY)
-        od_server.AirDropUtil.write_debug(self.config, resp, 'receive_ask_response.plist')
-        self._set_response(len(resp))
-        self.wfile.write(resp)
+        write_debug(resp, 'receive_ask_response.plist')
+        self.answer(resp)
 
     def handle_upload(self):
         # An Upload that never passed an Ask has nothing vouching for it, and
@@ -854,31 +859,78 @@ class Handler(od_server.AirDropServerHandler):
         logging.info('%s %s', self.client_address[0], fmt % a)
 
 
-# sharingd opens several connections at once; a single-threaded server would
-# hold /Discover behind a stalled one.
-od_server.HTTPServerV6 = ThreadingHTTPServerV6
-od_server.AirDropServerHandler = Handler
-if not args.announce:
-    od_server.Zeroconf = NoZeroconf
+# ------------------------------------------------------------------ identity
+#
+# The certificate this machine presents and the Apple ID validation record
+# that lets a Contacts Only sender recognise it, in the layout every install
+# already has under --keys. The sender reads the same files.
+KEY_DIR = os.path.join(args.keys, 'keys')
+CERT_FILE = os.path.join(KEY_DIR, 'certificate.pem')
+KEY_FILE = os.path.join(KEY_DIR, 'key.pem')
+RECORD_FILE = os.path.join(KEY_DIR, 'validation_record.cms')
+# The latest Discover and Ask exchange, request and answer, one file each: what
+# a device actually sent, for when one misbehaves.
+DEBUG_DIR = os.path.join(args.keys, 'debug')
 
-config = AirDropConfig(host_name=args.host, computer_name=NAME,
-                       computer_model=MODEL, server_port=args.port,
-                       airdrop_dir=args.keys, service_id=sid,
-                       interface=args.iface, debug=True)
 
-# Ask the peer for a client certificate. Required for Contacts Only, because
-# that certificate is what binds a sender's Apple-signed validation record to
-# the live connection; a record on its own is handed to any prober that asks
-# and would otherwise be replayable. opendrop uses CERT_NONE and so never sees
-# one.
+def write_debug(data, name):
+    os.makedirs(DEBUG_DIR, exist_ok=True)
+    with open(os.path.join(DEBUG_DIR, name), 'wb') as fh:
+        fh.write(data)
+
+
+def ensure_certificate():
+    """`omdrop setup` creates the certificate before the first start; this
+    covers one deleted since. Same command, same place, same name."""
+    if os.path.exists(CERT_FILE) and os.path.exists(KEY_FILE):
+        return
+    logging.info('no certificate in %s; creating a self-signed one', KEY_DIR)
+    for d in (args.keys, KEY_DIR):
+        os.makedirs(d, mode=0o700, exist_ok=True)
+    made = subprocess.run(
+        ['openssl', 'req', '-newkey', 'rsa:2048', '-nodes', '-keyout', 'key.pem',
+         '-x509', '-days', '365', '-out', 'certificate.pem', '-subj', f'/CN={NAME}'],
+        cwd=KEY_DIR, capture_output=True)
+    if made.returncode != 0:
+        # Key-generation progress is rows of . + and *; keep the error lines.
+        errors = [line for line in made.stderr.decode(errors='replace').splitlines()
+                  if line.strip('.+*')]
+        raise SystemExit(f'openssl could not create a certificate in {KEY_DIR}: '
+                         + ' / '.join(errors))
+
+
+APPLE_ROOT = contacts.apple_root_ca()
+if APPLE_ROOT is None:
+    raise SystemExit(f'Apple root CA certificate missing: {contacts.APPLE_ROOT_CA}')
+ensure_certificate()
+try:
+    with open(RECORD_FILE, 'rb') as fh:
+        RECORD_DATA = fh.read()
+    logging.info('Apple ID validation record: %d bytes', len(RECORD_DATA))
+except FileNotFoundError:
+    RECORD_DATA = None
+    logging.info('no Apple ID validation record in %s', KEY_DIR)
+
+# ----------------------------------------------------------------------- TLS
+#
+# The base context is what AirDrop peers expect of each other: this machine's
+# certificate, TLS 1.0 refused (Python's own floor, TLS 1.2 today, stands when
+# higher), and CERT_NONE, because senders present self-signed certificates as
+# a matter of course.
+#
+# On top of that, ask the peer for a client certificate. Required for Contacts
+# Only, because that certificate is what binds a sender's Apple-signed
+# validation record to the live connection; a record on its own is handed to
+# any prober that asks and would otherwise be replayable. CERT_NONE never
+# asks, and so never sees one.
 #
 # Two things this has to get right, both learned the hard way on 2026-09-19:
 #
 # CERT_OPTIONAL means "a certificate may be absent", NOT "a certificate is
 # tolerated". A peer that does present one has it verified, and a failure
-# aborts the handshake with unknown_ca before any request is read. The context
-# opendrop builds trusts only Apple's root, while an Apple leaf is issued by
-# the "Apple Application Integration Certification Authority" intermediate, so
+# aborts the handshake with unknown_ca before any request is read. The base
+# context trusts only Apple's root, while an Apple leaf is issued by the
+# "Apple Application Integration Certification Authority" intermediate, so
 # every Apple sender failed to chain and was refused at TLS. The intermediates
 # vendored beside contacts.py are the missing link; certificate_account()
 # already passes them for the same chain.
@@ -899,11 +951,14 @@ config = AirDropConfig(host_name=args.host, computer_name=NAME,
 # OMDROP_PEERCERT saves what arrives, for research; it keeps the certificate
 # request alive in Everyone mode so a capture run still sees one.
 PEERCERT_DIR = os.environ.get('OMDROP_PEERCERT')
-_plain_context = config.get_ssl_context
 
 
-def _requesting_context():
-    ctx = _plain_context()
+def tls_context():
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.minimum_version = max(ctx.minimum_version, ssl.TLSVersion.TLSv1_1)
+    ctx.load_cert_chain(CERT_FILE, keyfile=KEY_FILE)
+    ctx.load_verify_locations(cafile=APPLE_ROOT)
+    ctx.verify_mode = ssl.CERT_NONE
     if contacts.visibility() != 'contacts' and not PEERCERT_DIR:
         return ctx
     for intermediate in contacts.apple_intermediates():
@@ -916,8 +971,6 @@ def _requesting_context():
     ctx.verify_mode = ssl.CERT_OPTIONAL
     return ctx
 
-
-config.get_ssl_context = _requesting_context
 
 if PEERCERT_DIR:
     os.makedirs(PEERCERT_DIR, exist_ok=True)
@@ -957,17 +1010,40 @@ if PEERCERT_DIR:
         else:
             logging.warning('peer presented NO client certificate')
 
-# opendrop answers a busy port by quietly moving to the next one, which
-# nothing advertises -- a receiver nobody can reach. Waiting is what the user
-# wants instead: the usual reason is the previous run's socket still unwinding,
-# which clears in seconds now that stopping resets its sessions.
+# ------------------------------------------------------------------- serving
+
+def interface_ipv6(iface):
+    """The first IPv6 address the kernel lists on iface, or None."""
+    try:
+        with open('/proc/net/if_inet6') as f:
+            rows = [line.split() for line in f]
+    except OSError:
+        return None
+    for row in rows:
+        if len(row) == 6 and row[5] == iface:
+            return ipaddress.IPv6Address(bytes.fromhex(row[0]))
+    return None
+
+
+# The socket is the IPv6 wildcard, but an interface with no address yet is one
+# no peer can reach, so refuse to start and let the unit try again.
+IFACE_ADDR = interface_ipv6(args.iface)
+if IFACE_ADDR is None:
+    raise SystemExit(f'interface {args.iface} has no IPv6 address yet; is the AWDL radio up?')
+
+
+# A busy port is waited out, never side-stepped. opendrop quietly moved to the
+# next one, which nothing advertises -- a receiver nobody can reach. Waiting is
+# what the user wants instead: the usual reason is the previous run's socket
+# still unwinding, which clears in seconds now that stopping resets its
+# sessions.
 def bind_server(attempts=5, pause=2):
     for attempt in range(1, attempts + 1):
-        config.port = args.port
-        candidate = AirDropServer(config)
-        if config.port == args.port:
-            return candidate
-        candidate.http_server.server_close()
+        try:
+            return ThreadingHTTPServerV6(('::', args.port), Handler)
+        except OSError as e:
+            if e.errno != errno.EADDRINUSE:
+                raise
         logging.warning('port %d still held; retry %d of %d', args.port,
                         attempt, attempts)
         time.sleep(pause)
@@ -979,11 +1055,10 @@ if server is None:
     logging.error('port %d is still held by something else after waiting; '
                   'the announcer only ever names %d', args.port, args.port)
     sys.exit(1)
+server.socket = tls_context().wrap_socket(server.socket, server_side=True)
 logging.info('config %s: %s', args.config, ', '.join(f'{k}={v!r}' for k, v in sorted(_cfg.items())) or 'absent (defaults)')
 logging.info('serving %s._airdrop._tcp.local as %s (%s) on [%s]:%d, receiving into %s',
-             sid, NAME, MODEL, server.ip_addr, config.port, DEST)
-if args.announce:
-    server.start_service()
+             sid, NAME, MODEL, IFACE_ADDR, args.port, DEST)
 
 # systemd stops this unit with SIGTERM, whose default action skips every
 # cleanup below -- including the session reset that frees the port.
@@ -993,10 +1068,9 @@ def on_term(signum, frame):
 
 signal.signal(signal.SIGTERM, on_term)
 try:
-    server.start_server()
+    server.serve_forever()
 except KeyboardInterrupt:
     pass
 finally:
-    server.stop()
-    server.http_server.reset_sessions()
-    server.http_server.server_close()
+    server.reset_sessions()
+    server.server_close()

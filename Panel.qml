@@ -669,7 +669,7 @@ Panel {
           var missing = d.missing || []
           root.doctorText = missing.length ? missing[0].say : ""
           // Both are installed by the same press: the driver is a package to
-          // build, the support library an AUR package the receiver imports.
+          // build, the library a repository package the receiver imports.
           root.driverInstallable = missing.some(function(m) {
             return m.id === "driver" || m.id === "library"
           })
