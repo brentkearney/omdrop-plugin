@@ -99,6 +99,8 @@ The radio helper, `/usr/lib/omdrop/omdrop-discoverable`, runs as root through `p
 
 The receiver runs as you, so received files are yours. The firewall rule is added with `sudo ufw` in the install terminal, which normally reuses the driver install's authentication.
 
+This computer's AirDrop identity is kept in `~/.omdrop/keys`: its certificate and key, and your Apple ID validation record if you've added one. If `~/.opendrop/keys` exists and `~/.omdrop` doesn't, Omdrop copies it there once and leaves the original in place for OpenDrop.
+
 ## Remove
 
 ```bash
@@ -106,6 +108,7 @@ omdrop firewall remove
 omdrop links remove
 omarchy plugin remove netmojo.omdrop
 sudo pacman -R brcmfmac-awdl-dkms
+rm -rf ~/.omdrop                    # this computer's AirDrop identity
 ```
 
 ## Known limitations

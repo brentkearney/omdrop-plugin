@@ -7,10 +7,12 @@ cover that state, and the next start failed 23 times in a row -- the panel said
 "The AirDrop receiver would not start" while nothing was listening on the port.
 """
 
+import os
 import socket
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -97,9 +99,20 @@ class BusyPortTests(unittest.TestCase):
         holder.bind(("::", port))
         holder.listen(1)
 
+        # Its own identity, config and download folder: the defaults are the
+        # user's real ones, and a receiver that finds no certificate there
+        # makes one -- which once replaced a real Apple ID identity.
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        root = Path(scratch.name)
+        (root / "xdg" / "airdrop").mkdir(parents=True)
+        (root / "out").mkdir()
         proc = subprocess.Popen(
-            [sys.executable, str(SERVE), "--iface", "awdl0", "--port", str(port)],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            [sys.executable, str(SERVE), "--iface", "awdl0", "--port", str(port),
+             "--keys", str(root / "identity"), "--outdir", str(root / "out"),
+             "--config", str(root / "xdg" / "airdrop" / "config.toml")],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            env=dict(os.environ, HOME=str(root), XDG_CONFIG_HOME=str(root / "xdg")))
         self.addCleanup(proc.kill)
 
         waited = self.read_until(proc, "still held", 20)

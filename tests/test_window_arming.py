@@ -45,6 +45,12 @@ systemctl(){{ log "systemctl $*"; }}
 pkexec(){{ log "pkexec $*"; return {radio}; }}
 ip(){{ return 1; }}
 die(){{ log "die $*"; exit 9; }}
+# The receiver start first brings the unit and the identity up to date; both
+# have their own tests.
+plugin_dir(){{ echo /plugin; }}
+unit_install(){{ return 1; }}
+prepare_identity(){{ :; }}
+ensure_tls(){{ return 1; }}
 # cmd_on brings the radio up through the spinner, which lives outside this
 # fragment. Run the command and drop the animation: what this file tests is
 # the ORDER the window is armed in, and a spinner would only add frames.

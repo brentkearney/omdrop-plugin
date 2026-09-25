@@ -53,11 +53,11 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=read-only
-# The download folder and the opendrop key dir are the only writable paths;
+# The download folder and the identity dir (~/.omdrop) are the only writable paths;
 # ReadWritePaths is re-evaluated at start, so a config change to download_dir
 # needs the matching path added here (deliberate: the unit declares what it may
 # write). `omdrop dir` writes a drop-in that does exactly that.
-ReadWritePaths=%h/Downloads %h/.opendrop
+ReadWritePaths=%h/Downloads %h/.omdrop
 ProtectKernelTunables=yes
 ProtectControlGroups=yes
 RestrictAddressFamilies=AF_INET6 AF_INET AF_UNIX AF_NETLINK

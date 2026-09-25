@@ -132,7 +132,7 @@ ap.add_argument('--name', default=None,
                 help='ReceiverComputerName: the label under the tile in the Mac sheet (config: name)')
 ap.add_argument('--model', default=None,
                 help='ReceiverModelName: Apple model identifier; picks the device glyph the sheet draws (config: model)')
-ap.add_argument('--keys', default=os.path.join(pwd.getpwuid(os.getuid()).pw_dir, '.opendrop'),
+ap.add_argument('--keys', default=os.path.join(pwd.getpwuid(os.getuid()).pw_dir, '.omdrop'),
                 help='identity dir holding keys/certificate.pem and keys/key.pem (a self-signed '
                      'pair is created if absent) and, optionally, keys/validation_record.cms')
 ap.add_argument('--outdir', default=None,

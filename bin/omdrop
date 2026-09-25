@@ -54,7 +54,7 @@ PROJ="$(cd "$(dirname "$SELF")/.." && pwd)"
 # A fallback that silently substitutes for the real value is the same class of
 # defect as a status line reporting a state that was never entered, so this one
 # says when it is guessing, and says when the two disagree.
-VERSION_FALLBACK=0.9.0
+VERSION_FALLBACK=0.9.1
 omdrop_version() {
   local dir manifest version= real
   real=$(readlink -f "$0" 2>/dev/null) || real="$0"
@@ -408,13 +408,54 @@ plugin_dir() {
 RECEIVER_PKGS=python-libarchive-c
 receiver_libs_installed() { python3 -c 'from libarchive import stream_reader' >/dev/null 2>&1; }
 
+# The identity this computer presents to Apple devices: its certificate and
+# key, and the Apple ID validation record when there is one. It lived in
+# ~/.opendrop while the receiver ran on opendrop, and moves to ~/.omdrop now
+# that opendrop is gone.
+IDENTITY_DIR="$HOME/.omdrop"
+LEGACY_IDENTITY_DIR="$HOME/.opendrop"
+
+# Copy an existing ~/.opendrop/keys into ~/.omdrop/keys, once. Only when
+# ~/.omdrop does not exist at all, so an identity already there is never
+# replaced, and never touching the original: opendrop itself may still be in
+# use elsewhere on this machine. The copy is assembled beside its destination
+# and renamed into place, so an interrupted copy leaves nothing that looks like
+# an identity. Returns 0 when it copied, 1 when there was nothing to do, 2 on
+# failure.
+migrate_identity() {
+  [[ -e "$IDENTITY_DIR" || -L "$IDENTITY_DIR" ]] && return 1
+  [[ -d "$LEGACY_IDENTITY_DIR/keys" ]] || return 1
+  local tmp
+  tmp=$(umask 077 && mktemp -d "$IDENTITY_DIR.XXXXXX") || return 2
+  # -p keeps each file's 0600 mode; the directories are made 0700 here.
+  if (umask 077 && mkdir -- "$tmp/keys") \
+     && cp -pR -- "$LEGACY_IDENTITY_DIR/keys/." "$tmp/keys/" \
+     && chmod 700 -- "$tmp" "$tmp/keys" \
+     && mv -T -- "$tmp" "$IDENTITY_DIR"; then
+    return 0
+  fi
+  rm -rf -- "$tmp"
+  return 2
+}
+
+# Run before anything reads the identity. Says what it did, because a copied
+# identity is something the person may want to know about.
+prepare_identity() {
+  migrate_identity
+  case $? in
+    0) echo "Copied this computer's AirDrop identity from $LEGACY_IDENTITY_DIR/keys to $IDENTITY_DIR/keys. The original is left in place." ;;
+    2) echo "omdrop could not copy the AirDrop identity from $LEGACY_IDENTITY_DIR/keys to $IDENTITY_DIR/keys." >&2; return 1 ;;
+  esac
+  return 0
+}
+
 # The certificate this computer identifies itself with, made here rather than
 # in the middle of somebody's first transfer: openssl takes a moment, and the
 # unit's start would be waiting on it while a sender is already knocking. The
-# receiver makes the same one if it ever starts without it. Same directory and
-# files as every earlier install, so an existing identity is never replaced.
+# receiver makes the same one if it ever starts without it. An existing
+# identity is never replaced.
 ensure_tls() {
-  local keys="$HOME/.opendrop/keys" out
+  local keys="$IDENTITY_DIR/keys" out
   [[ -r "$keys/certificate.pem" && -r "$keys/key.pem" ]] && return 1
   (umask 077 && mkdir -p -- "$keys") || return 2
   # openssl draws key-generation progress as rows of . + and *; on failure
@@ -426,11 +467,14 @@ ensure_tls() {
   return 0
 }
 
-cmd_setup() {
-  local plugin template installed unit_target rendered did=0
-
-  plugin=$(plugin_dir) \
-    || die "omdrop cannot tell where it is installed, so it did not change anything."
+# Write the receiving service from this plugin's template when the installed
+# copy differs from it. Returns 0 when it wrote something, 1 when it was
+# already current. Run by setup and before every start, so an updated plugin
+# never runs its receiver under the previous version's unit: 0.9.1 moved the
+# identity to ~/.omdrop, and a unit that still only allowed writes to
+# ~/.opendrop failed every Discover.
+unit_install() {
+  local plugin=$1 template rendered unit_target installed dropin changed=1
   template="$plugin/share/$UNIT"
   [[ -r "$template" ]] \
     || die "This copy of omdrop is missing the file that describes the receiving service, so there is nothing to set up. Install the plugin again."
@@ -456,8 +500,28 @@ cmd_setup() {
   if [[ "$rendered" != "$installed" ]]; then
     printf '%s\n' "$rendered" > "$unit_target" \
       || die "omdrop could not write the receiving service."
+    changed=0
+  fi
+  # `omdrop dir` drop-ins written before 0.9.1 name the old identity folder.
+  dropin="$unit_target.d/10-download-dir.conf"
+  if [[ -f "$dropin" ]] && grep -qx 'ReadWritePaths=%h/.opendrop' "$dropin"; then
+    sed -i 's|^ReadWritePaths=%h/\.opendrop$|ReadWritePaths=%h/.omdrop|' "$dropin" \
+      || die "omdrop could not update $dropin."
+    changed=0
+  fi
+  if (( changed == 0 )); then
     systemctl --user daemon-reload \
       || die "The receiving service was written, but systemd would not reload it. Log out and back in, then try again."
+  fi
+  return "$changed"
+}
+
+cmd_setup() {
+  local plugin did=0
+
+  plugin=$(plugin_dir) \
+    || die "omdrop cannot tell where it is installed, so it did not change anything."
+  if unit_install "$plugin"; then
     did=1
     echo "Set up the service that receives files."
   fi
@@ -494,11 +558,22 @@ cmd_setup() {
     printf 'Apple devices will see this computer as "%s". Change it with: omdrop name\n' "$(effective_name)"
   fi
 
-  ensure_tls
-  case $? in
-    0) did=1; echo "Created the certificate this computer identifies itself with." ;;
-    2) echo "The certificate this computer identifies itself with could not be created in ~/.opendrop/keys; the reason is above." >&2 ;;
+  # A failed copy must not be followed by a fresh certificate: that would
+  # create ~/.omdrop, the copy would never be tried again, and an Apple ID
+  # identity in ~/.opendrop would be silently replaced by a self-signed one.
+  local migrated
+  migrate_identity; migrated=$?
+  case $migrated in
+    0) did=1; echo "Copied this computer's AirDrop identity from $LEGACY_IDENTITY_DIR/keys to $IDENTITY_DIR/keys. The original is left in place." ;;
+    2) echo "omdrop could not copy the AirDrop identity from $LEGACY_IDENTITY_DIR/keys to $IDENTITY_DIR/keys." >&2 ;;
   esac
+  if (( migrated != 2 )); then
+    ensure_tls
+    case $? in
+      0) did=1; echo "Created the certificate this computer identifies itself with." ;;
+      2) echo "The certificate this computer identifies itself with could not be created in $IDENTITY_DIR/keys; the reason is above." >&2 ;;
+    esac
+  fi
 
   (( did )) || echo "Everything omdrop sets up for you was already in place."
 
@@ -634,11 +709,11 @@ DRIVER_PKG=brcmfmac-awdl-dkms
 # checkout below is detached at this SHA and the build only runs if it
 # succeeded. Bump it, in the same commit, whenever the plugin needs a newer
 # driver: the full 40 characters, because a short SHA is not a pin.
-DRIVER_COMMIT=9700393607fc2acbe06c6a3cabd097271c326534
+DRIVER_COMMIT=ab9f9ec6c792300ce16c2d9a8335a33161d56b79
 # The package version that commit builds. install-driver rebuilds any older
 # installed driver: a fix inside the helper, such as 0.5.1's, changes nothing
 # a feature probe could see.
-DRIVER_VERSION=0.6.0
+DRIVER_VERSION=0.6.1
 
 cmd_install_driver() {
   local self_q
@@ -697,7 +772,7 @@ else
   git clone --quiet $DRIVER_REPO '$src'
 fi
 echo 'Building driver commit $DRIVER_COMMIT'
-git -C '$src' checkout --detach 9700393607fc2acbe06c6a3cabd097271c326534 && makepkg --dir '$src' -si"
+git -C '$src' checkout --detach ab9f9ec6c792300ce16c2d9a8335a33161d56b79 && makepkg --dir '$src' -si"
     fi
   fi
 
@@ -852,7 +927,15 @@ cmd_on() {
   # restarted four times, and latched. Clearing the latch costs nothing when
   # there is none, and is the difference between a transient failure and a
   # feature that never works again.
+  #
+  # The unit and the identity are brought up to date first, so a plugin update
+  # needs no separate `omdrop setup` before the receiver runs again.
   start_receiver() {
+    local plugin
+    plugin=$(plugin_dir) || { echo "omdrop cannot tell where it is installed." >&2; return 1; }
+    unit_install "$plugin" || true
+    prepare_identity >&2 || return 1
+    ensure_tls; (( $? == 2 )) && return 1
     systemctl --user reset-failed "$UNIT" >/dev/null 2>&1 || true
     systemctl --user start "$UNIT"
   }
@@ -1839,7 +1922,7 @@ cmd_dir() {
     echo "[Service]"
     echo "ReadWritePaths="
     echo "ReadWritePaths=$new"
-    echo "ReadWritePaths=%h/.opendrop"
+    echo "ReadWritePaths=%h/.omdrop"
   } > "$dropin/10-download-dir.conf"
   systemctl --user daemon-reload
 
