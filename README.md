@@ -119,6 +119,16 @@ Apple devices recognize this computer by its AirDrop identity: a certificate, it
 
 Run `omdrop identity` to see which one is in use.
 
+### Obtaining an Apple-issued identity
+
+Sending to and receiving from Contacts Only devices requires an Apple-issued **AirDrop identity**, not your Apple Account password. Omdrop does not currently obtain or register this identity for you.
+
+An advanced, manual approach is to extract the AirDrop certificate, its matching private key, and the Apple ID validation record from a Mac signed into your own Apple Account. Readers investigating this approach can look into **macOS Keychain**, the **`sharingd` service**, and research on **AirDrop authentication**. Extraction is not documented or automated by this project yet, and methods may vary by macOS version.
+
+Treat the private key and validation record as sensitive credentials. Use only an identity from a device and account you control; never share these files in issues, logs, or support requests. Once obtained, the identity can be stored locally or imported into 1Password as described below. **The 1Password import command stores an existing identity; it does not obtain one from Apple.**
+
+Without an Apple-issued identity, Omdrop can still send to and receive from devices whose AirDrop visibility is set to **Everyone**.
+
 ### Keep your Apple identity in 1Password
 
 Your Apple identity's private key lets anyone holding it present themselves as you to nearby Apple devices. Keeping it in 1Password takes it off disk. Omdrop fetches it when you turn Omdrop on, keeps it in the kernel's memory for 12 hours, and receives without asking again during that time.
