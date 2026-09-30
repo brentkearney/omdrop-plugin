@@ -135,6 +135,8 @@ Your Apple identity's private key lets anyone holding it present themselves as y
 
 The first `omdrop on` afterwards asks 1Password for the identity. If 1Password isn't running, is locked, or you dismiss its prompt, that window uses the self-signed identity and a notification says so; Contacts Only devices won't see this computer until the next window that has your identity.
 
+Approving takes two steps. 1Password asks whether to allow the request, then the system asks for your computer's login password, because of the system authentication setting in step 2. Omdrop makes these requests only when you turn it on or run `omdrop identity unlock`; don't approve one you didn't start.
+
 | Command | What it does |
 |---|---|
 | `omdrop identity unlock` | Fetch now, for example when you log in, so the prompt doesn't come mid-task. |
