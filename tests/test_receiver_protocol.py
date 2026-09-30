@@ -234,5 +234,18 @@ class ContactsOnlyTests(ReceiverFixture):
         self.assertEqual(status, 200)
 
 
+class StalledHandshakeTests(ReceiverFixture):
+    def test_a_connection_that_never_finishes_its_handshake_does_not_block_the_next_sender(self):
+        # A sender that drops off the AWDL link mid-handshake leaves a TCP
+        # connection that never sends another byte. Handshaking on the accept
+        # thread with no timeout stopped every later connection from being
+        # accepted, so the receiver went silent for the rest of its window.
+        silent = socket.create_connection(("::1", self.port))
+        self.addCleanup(silent.close)
+        status, _ = self.post(self.connection(), "/Discover",
+                              plistlib.dumps({}, fmt=plistlib.FMT_BINARY))
+        self.assertEqual(status, 200)
+
+
 if __name__ == "__main__":
     unittest.main()

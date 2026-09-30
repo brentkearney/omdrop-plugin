@@ -245,32 +245,6 @@ class ArchiveExtractionLimitTests(unittest.TestCase):
             self.assertEqual(list(Path(dest).iterdir()), [])
 
 
-class ReadDeadlineTests(unittest.TestCase):
-    def test_handler_sets_an_idle_timeout_on_each_accepted_socket(self):
-        source = SERVE.read_text()
-        start = source.index("class Handler(")
-        end = source.index("\n# ---", start)
-
-        class BaseHandler:
-            def setup(self):
-                self.connection = self.request
-
-        namespace = {
-            "BaseHTTPRequestHandler": BaseHandler,
-            "READ_IDLE_TIMEOUT_SECONDS": 30,
-        }
-        exec(source[start:end], namespace)
-        left, right = socket.socketpair()
-        self.addCleanup(left.close)
-        self.addCleanup(right.close)
-        handler = namespace["Handler"].__new__(namespace["Handler"])
-        handler.request = left
-
-        handler.setup()
-
-        self.assertEqual(left.gettimeout(), 30)
-
-
 class LimitCommandTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

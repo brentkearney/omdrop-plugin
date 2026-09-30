@@ -214,9 +214,15 @@ class ThreadingHTTPServerV6(ThreadingHTTPServer):
         # sharingd closes the keep-alive TLS session with a RST once the
         # transfer is done (211010Z); the resulting ECONNRESET on the next
         # readline is the normal end of a session, not a fault.
-        if isinstance(sys.exc_info()[1], ConnectionResetError):
+        if isinstance(sys.exc_info()[1], (ConnectionResetError, HandshakeFailed)):
             return
         super().handle_error(request, client_address)
+
+
+# Raised by Handler.setup once a failed handshake is logged, so handle_error
+# does not add a traceback for what is usually a sender leaving the link.
+class HandshakeFailed(Exception):
+    pass
 
 
 KIB = 1024
@@ -642,9 +648,19 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
 
     def setup(self):
-        # Applies to request headers and every body read. A peer that stops
-        # transmitting cannot hold one server thread forever.
+        # Applies to the TLS handshake, request headers and every body read. A
+        # peer that stops transmitting cannot hold one server thread forever.
         self.request.settimeout(READ_IDLE_TIMEOUT_SECONDS)
+        # The handshake runs here, on this connection's own thread, not in
+        # accept(): there, one sender that dropped off the link mid-handshake
+        # stopped every later connection from being accepted for the rest of
+        # the window (2026-09-30 17:13Z: backlog full, iPhone never answered).
+        try:
+            self.request.do_handshake()
+        except OSError as e:
+            logging.info('TLS handshake with [%s]:%s failed: %s',
+                         self.client_address[0], self.client_address[1], e)
+            raise HandshakeFailed from e
         super().setup()
 
     def handle_expect_100(self):
@@ -1065,7 +1081,8 @@ if server is None:
     logging.error('port %d is still held by something else after waiting; '
                   'the announcer only ever names %d', args.port, args.port)
     sys.exit(1)
-server.socket = tls_context().wrap_socket(server.socket, server_side=True)
+server.socket = tls_context().wrap_socket(server.socket, server_side=True,
+                                          do_handshake_on_connect=False)
 logging.info('config %s: %s', args.config, ', '.join(f'{k}={v!r}' for k, v in sorted(_cfg.items())) or 'absent (defaults)')
 logging.info('serving %s._airdrop._tcp.local as %s (%s) on [%s]:%d, receiving into %s',
              sid, NAME, MODEL, IFACE_ADDR, args.port, DEST)
