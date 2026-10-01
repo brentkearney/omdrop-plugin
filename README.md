@@ -109,25 +109,25 @@ Each transfer is capped at 30% of free disk space by default, and at least 1 GiB
 
 ## Your AirDrop identity
 
-Apple devices recognize this computer by its AirDrop identity: a certificate, its private key, and, for Contacts Only, your Apple ID validation record. Omdrop uses one of three:
+Apple devices recognize this computer by its AirDrop identity: a certificate, its private key, and, for sending to Contacts Only devices, your Apple ID validation record. Omdrop uses one of three:
 
-| Identity | Where it lives | Who can see this computer |
+| Identity | Where it lives | What it allows |
 |---|---|---|
-| Self-signed | `~/.omdrop/keys/certificate.self-signed.pem` and `key.self-signed.pem`, created automatically | Devices set to Everyone |
-| Apple, on disk | `~/.omdrop/keys/certificate.pem`, `key.pem`, `validation_record.cms` | Everyone, and Contacts Only devices whose owner has you as a contact |
+| Self-signed | `~/.omdrop/keys/certificate.self-signed.pem` and `key.self-signed.pem`, created automatically | Receiving from anyone, or only from your known senders; sending to devices set to Everyone. Senders list this computer under Other Devices |
+| Apple, on disk | `~/.omdrop/keys/certificate.pem`, `key.pem`, `validation_record.cms` | The same, plus sending to Contacts Only devices whose owner has you as a contact. Your own Apple devices list this computer under My Devices |
 | Apple, in 1Password (recommended) | A 1Password item; cached in memory while in use | The same as on disk |
 
 Run `omdrop identity` to see which one is in use.
 
 ### Obtaining an Apple-issued identity
 
-Sending to and receiving from Contacts Only devices requires an Apple-issued **AirDrop identity**, not your Apple Account password. Omdrop does not currently obtain or register this identity for you.
+Sending to Contacts Only devices requires an Apple-issued **AirDrop identity**, not your Apple Account password. Receiving doesn't: accepting files only from your known senders works with the self-signed identity, because Omdrop checks the sender's Apple-signed record (see [Contacts Only](#contacts-only)). Omdrop does not currently obtain or register an Apple-issued identity for you.
 
 An advanced, manual approach is to extract the AirDrop certificate, its matching private key, and the Apple ID validation record from a Mac signed into your own Apple Account. Readers investigating this approach can look into **macOS Keychain**, the **`sharingd` service**, and research on **AirDrop authentication**. Extraction is not documented or automated by this project yet, and methods may vary by macOS version.
 
 Treat the private key and validation record as sensitive credentials. Use only an identity from a device and account you control; never share these files in issues, logs, or support requests. Once obtained, the identity can be stored locally or imported into 1Password as described below. **The 1Password import command stores an existing identity; it does not obtain one from Apple.**
 
-Without an Apple-issued identity, Omdrop can still send to and receive from devices whose AirDrop visibility is set to **Everyone**.
+Without an Apple-issued identity, Omdrop can still receive from anyone, or only from your known senders, and send to devices whose AirDrop visibility is set to **Everyone**.
 
 ### Keep your Apple identity in 1Password
 
@@ -143,7 +143,7 @@ Your Apple identity's private key lets anyone holding it present themselves as y
 
    This creates a 1Password item, **Omdrop AirDrop identity**, reads it back, and deletes the files from `~/.omdrop/keys` only when 1Password holds an identical copy. Add `--vault NAME` to choose a vault. On another computer, `omdrop identity 1password use ITEM` uses the same item.
 
-The first `omdrop on` afterwards asks 1Password for the identity. If 1Password isn't running, is locked, or you dismiss its prompt, that window uses the self-signed identity and a notification says so; Contacts Only devices won't see this computer until the next window that has your identity.
+The first `omdrop on` afterwards asks 1Password for the identity. If 1Password isn't running, is locked, or you dismiss its prompt, that window uses the self-signed identity and a notification says so; until the next window that has your identity, this computer can't send to Contacts Only devices, and senders list it under Other Devices.
 
 When Omdrop asks 1Password for the identity, 1Password asks whether to allow the request and may then ask you to confirm through system authentication, such as your computer's login password or fingerprint, because of the setting in step 2. If you approved a request recently, 1Password may not ask at all. Omdrop asks only when you turn it on without a cached identity, or run `omdrop identity unlock`, `omdrop identity 1password import` or `omdrop identity 1password use`; don't approve a request you didn't start.
 
