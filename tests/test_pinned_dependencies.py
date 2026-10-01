@@ -66,7 +66,7 @@ class PinnedDependencyTests(unittest.TestCase):
         # Without it the receiver cannot start, and the driver on its own does
         # not guarantee it. Installed by exact package name, never built.
         _, script = self.build_script()
-        self.assertRegex(script, r"(?m)^sudo pacman -S --needed --asdeps python-libarchive-c$")
+        self.assertRegex(script, r"(?m)^sudo pacman -S --needed --asdeps python-libarchive-c keyutils$")
 
     def test_the_pinned_commit_is_a_full_sha_used_literally(self):
         # Two places name the commit -- the constant a reader is shown, and

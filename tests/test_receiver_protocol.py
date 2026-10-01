@@ -97,7 +97,11 @@ class ReceiverFixture(unittest.TestCase):
 
         cls.port = free_port()
         cls.log = root / "receiver.log"
-        env = dict(os.environ, XDG_CONFIG_HOME=str(xdg))
+        # Its own runtime directory too: a live window's identity file on this
+        # machine must not decide what the test receiver presents.
+        runtime = root / "run"
+        runtime.mkdir(mode=0o700)
+        env = dict(os.environ, XDG_CONFIG_HOME=str(xdg), XDG_RUNTIME_DIR=str(runtime))
         with open(cls.log, "w") as log:
             cls.proc = subprocess.Popen(
                 [sys.executable, str(SERVE), "--iface", "lo", "--port", str(cls.port),
@@ -195,12 +199,15 @@ class ExistingIdentityTests(ReceiverFixture):
 class FirstStartTests(ReceiverFixture):
     seed_identity = False
 
-    def test_a_first_start_creates_a_private_identity_named_after_the_receiver(self):
+    def test_a_first_start_creates_a_private_self_signed_pair_named_after_the_receiver(self):
         self.assertEqual(self.keys.stat().st_mode & 0o777, 0o700)
+        # Only the self-signed names: the Apple identity's names are never written.
+        self.assertEqual(sorted(p.name for p in self.keys.iterdir() if not p.name.startswith(".")),
+                         ["certificate.self-signed.pem", "key.self-signed.pem"])
         conn = self.connection()
         conn.connect()
         served = conn.sock.getpeercert(binary_form=True)
-        self.assertEqual(served, der(self.keys / "certificate.pem"))
+        self.assertEqual(served, der(self.keys / "certificate.self-signed.pem"))
         subject = subprocess.run(["openssl", "x509", "-inform", "DER", "-noout", "-subject"],
                                  input=served, capture_output=True, check=True).stdout
         self.assertIn(f"CN={NAME}".encode(), subject.replace(b" = ", b"="))
@@ -223,6 +230,19 @@ class ContactsOnlyTests(ReceiverFixture):
 
     def test_a_sender_without_a_certificate_still_completes_the_handshake(self):
         status, _ = self.post(self.connection(tls12=True), "/Discover",
+                              plistlib.dumps({}, fmt=plistlib.FMT_BINARY))
+        self.assertEqual(status, 200)
+
+
+class StalledHandshakeTests(ReceiverFixture):
+    def test_a_connection_that_never_finishes_its_handshake_does_not_block_the_next_sender(self):
+        # A sender that drops off the AWDL link mid-handshake leaves a TCP
+        # connection that never sends another byte. Handshaking on the accept
+        # thread with no timeout stopped every later connection from being
+        # accepted, so the receiver went silent for the rest of its window.
+        silent = socket.create_connection(("::1", self.port))
+        self.addCleanup(silent.close)
+        status, _ = self.post(self.connection(), "/Discover",
                               plistlib.dumps({}, fmt=plistlib.FMT_BINARY))
         self.assertEqual(status, 200)
 

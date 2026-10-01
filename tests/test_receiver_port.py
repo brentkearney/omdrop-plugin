@@ -107,12 +107,14 @@ class BusyPortTests(unittest.TestCase):
         root = Path(scratch.name)
         (root / "xdg" / "airdrop").mkdir(parents=True)
         (root / "out").mkdir()
+        (root / "run").mkdir(mode=0o700)
         proc = subprocess.Popen(
             [sys.executable, str(SERVE), "--iface", "awdl0", "--port", str(port),
              "--keys", str(root / "identity"), "--outdir", str(root / "out"),
              "--config", str(root / "xdg" / "airdrop" / "config.toml")],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-            env=dict(os.environ, HOME=str(root), XDG_CONFIG_HOME=str(root / "xdg")))
+            env=dict(os.environ, HOME=str(root), XDG_CONFIG_HOME=str(root / "xdg"),
+                     XDG_RUNTIME_DIR=str(root / "run")))
         self.addCleanup(proc.kill)
 
         waited = self.read_until(proc, "still held", 20)

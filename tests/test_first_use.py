@@ -39,10 +39,15 @@ class FirstUseTests(unittest.TestCase):
                                ("pkexec", "#!/bin/sh\nexit 1\n")):
                 (fakebin / name).write_text(body)
                 (fakebin / name).chmod(0o755)
+            # Its own runtime directory: `on` takes the identity lock and
+            # writes the window file there, and must never touch the real one.
+            runtime = home / "run"
+            runtime.mkdir(mode=0o700)
             env = {
                 "HOME": str(home),
                 "XDG_CONFIG_HOME": str(home / ".config"),
                 "XDG_BIN_HOME": str(home / ".local" / "bin"),
+                "XDG_RUNTIME_DIR": str(runtime),
                 "PATH": f"{fakebin}:{os.environ['PATH']}",
             }
             result = subprocess.run([str(OMDROP), "on", "1m"], env=env,

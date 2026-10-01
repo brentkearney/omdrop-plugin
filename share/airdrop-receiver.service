@@ -58,12 +58,17 @@ ProtectHome=read-only
 # needs the matching path added here (deliberate: the unit declares what it may
 # write). `omdrop dir` writes a drop-in that does exactly that.
 ReadWritePaths=%h/Downloads %h/.omdrop
+# Opt-in protocol dumps (OMDROP_DEBUG=1) go to the runtime directory, never the
+# home directory: they can carry validation records. `-`: absent unless used.
+ReadWritePaths=-%t/omdrop/debug
 ProtectKernelTunables=yes
 ProtectControlGroups=yes
 RestrictAddressFamilies=AF_INET6 AF_INET AF_UNIX AF_NETLINK
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
+# The identity's private key is in this process's memory for the window.
+LimitCORE=0
 
 [Install]
 WantedBy=default.target

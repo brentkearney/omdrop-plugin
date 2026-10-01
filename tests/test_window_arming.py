@@ -18,7 +18,7 @@ OMDROP = ROOT / "bin" / "omdrop"
 
 
 class WindowArmingOrderTests(unittest.TestCase):
-    def run_on(self, window="10m", radio=0):
+    def run_on(self, window="10m", radio=0, identity="source=self-signed", arm_fails=False):
         source = OMDROP.read_text()
         fragment = source[source.index("cmd_on() {"):source.index("\ncmd_off()")]
         with tempfile.TemporaryDirectory() as directory:
@@ -40,7 +40,7 @@ log(){{ printf '%s\\n' "$*" >> "$CAPTURE"; }}
 require_unit(){{ :; }}
 span_seconds(){{ echo 600; }}
 cancel_window(){{ log cancel_window; }}
-systemd-run(){{ log "systemd-run $*"; }}
+systemd-run(){{ log "systemd-run $*"; case "$*" in *omdrop-identity-expiry*) return {1 if arm_fails else 0} ;; esac; }}
 systemctl(){{ log "systemctl $*"; }}
 pkexec(){{ log "pkexec $*"; return {radio}; }}
 ip(){{ return 1; }}
@@ -51,6 +51,14 @@ plugin_dir(){{ echo /plugin; }}
 unit_install(){{ return 1; }}
 prepare_identity(){{ :; }}
 ensure_tls(){{ return 1; }}
+# The identity step has its own tests; here it settles on self-signed.
+ID_EXPIRY=omdrop-identity-expiry
+id_py(){{ case "$1" in begin) echo seq=0 ;; window) printf {identity!r}; echo ;; stop-*) log "identity $1" ;; esac; }}
+ID_PY=id_py
+identity_lock(){{ :; }}
+identity_unlock(){{ :; }}
+identity_notice(){{ log "notice $*"; }}
+effective_name(){{ echo test; }}
 # cmd_on brings the radio up through the spinner, which lives outside this
 # fragment. Run the command and drop the animation: what this file tests is
 # the ORDER the window is armed in, and a spinner would only add frames.
@@ -113,6 +121,19 @@ cmd_on {window}
         self.assertLess(events.rindex("cancel_window"), events.index("die"),
                         events)
         self.assertNotIn("on-active", events)
+
+    def test_a_1password_window_arms_its_hard_expiry_before_anything_starts(self):
+        result, events = self.run_on(identity="source=1password\nexpiry_in=3600")
+        self.assertIn("--on-active=3600s --unit=omdrop-identity-expiry", events, events)
+        self.assertLess(events.index("omdrop-identity-expiry"), events.index("pkexec"), events)
+
+    def test_a_window_whose_hard_expiry_cannot_be_armed_never_starts(self):
+        # A bound that is only advice is not a bound: nothing may start.
+        result, events = self.run_on(identity="source=1password\nexpiry_in=3600", arm_fails=True)
+        self.assertIn("die", events, events)
+        self.assertIn("identity stop-end", events, events)
+        self.assertNotIn("pkexec", events)
+        self.assertNotIn("--user start", events)
 
 
 if __name__ == "__main__":

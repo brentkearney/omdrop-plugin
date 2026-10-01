@@ -107,13 +107,69 @@ The list is stored in plain text so you can edit it. Identifiers are hashed for 
 
 Each transfer is capped at 30% of free disk space by default, and at least 1 GiB is always left free. To change the cap, run `omdrop limit PERCENT` with a value from 1 to 90.
 
+## Your AirDrop identity
+
+Apple devices recognize this computer by its AirDrop identity: a certificate, its private key, and, for Contacts Only, your Apple ID validation record. Omdrop uses one of three:
+
+| Identity | Where it lives | Who can see this computer |
+|---|---|---|
+| Self-signed | `~/.omdrop/keys/certificate.self-signed.pem` and `key.self-signed.pem`, created automatically | Devices set to Everyone |
+| Apple, on disk | `~/.omdrop/keys/certificate.pem`, `key.pem`, `validation_record.cms` | Everyone, and Contacts Only devices whose owner has you as a contact |
+| Apple, in 1Password (recommended) | A 1Password item; cached in memory while in use | The same as on disk |
+
+Run `omdrop identity` to see which one is in use.
+
+### Obtaining an Apple-issued identity
+
+Sending to and receiving from Contacts Only devices requires an Apple-issued **AirDrop identity**, not your Apple Account password. Omdrop does not currently obtain or register this identity for you.
+
+An advanced, manual approach is to extract the AirDrop certificate, its matching private key, and the Apple ID validation record from a Mac signed into your own Apple Account. Readers investigating this approach can look into **macOS Keychain**, the **`sharingd` service**, and research on **AirDrop authentication**. Extraction is not documented or automated by this project yet, and methods may vary by macOS version.
+
+Treat the private key and validation record as sensitive credentials. Use only an identity from a device and account you control; never share these files in issues, logs, or support requests. Once obtained, the identity can be stored locally or imported into 1Password as described below. **The 1Password import command stores an existing identity; it does not obtain one from Apple.**
+
+Without an Apple-issued identity, Omdrop can still send to and receive from devices whose AirDrop visibility is set to **Everyone**.
+
+### Keep your Apple identity in 1Password
+
+Your Apple identity's private key lets anyone holding it present themselves as you to nearby Apple devices. Keeping it in 1Password takes it off disk. Omdrop fetches it when you turn Omdrop on, keeps it in the kernel's memory for 12 hours, and receives without asking again during that time.
+
+1. Install the [1Password CLI](https://developer.1password.com/docs/cli/get-started/) and open the 1Password app.
+2. In 1Password, turn on **Settings → Security → Unlock using system authentication** and **Settings → Developer → Integrate with 1Password CLI**. A polkit authentication agent must be running for 1Password to show its prompt.
+3. Move the identity:
+
+   ```bash
+   omdrop identity 1password import
+   ```
+
+   This creates a 1Password item, **Omdrop AirDrop identity**, reads it back, and deletes the files from `~/.omdrop/keys` only when 1Password holds an identical copy. Add `--vault NAME` to choose a vault. On another computer, `omdrop identity 1password use ITEM` uses the same item.
+
+The first `omdrop on` afterwards asks 1Password for the identity. If 1Password isn't running, is locked, or you dismiss its prompt, that window uses the self-signed identity and a notification says so; Contacts Only devices won't see this computer until the next window that has your identity.
+
+When Omdrop asks 1Password for the identity, 1Password asks whether to allow the request and may then ask you to confirm through system authentication, such as your computer's login password or fingerprint, because of the setting in step 2. If you approved a request recently, 1Password may not ask at all. Omdrop asks only when you turn it on without a cached identity, or run `omdrop identity unlock`, `omdrop identity 1password import` or `omdrop identity 1password use`; don't approve a request you didn't start.
+
+| Command | What it does |
+|---|---|
+| `omdrop identity unlock` | Fetch now, for example when you log in, so the prompt doesn't come mid-task. |
+| `omdrop identity lock` | Turn Omdrop off and clear the cached identity. The next `omdrop on` asks again. |
+| `omdrop identity 1password off` | Stop using 1Password. The item stays in 1Password. |
+
+To change how long the identity stays cached, set `identity_cache_hours=` (1 to 24) in `~/.config/omdrop/settings`. A window can hold the identity past that, up to 24 hours after it was fetched; after 24 hours Omdrop turns off.
+
+What the cache does and doesn't protect against:
+
+- The cached identity lives in kernel memory, isn't written to a file, and is gone after a reboot or when it expires. Logging out doesn't clear it if your account has systemd lingering enabled.
+- Any program running as you, and root, can read it, just as they could read a file only you can open. Linux has no per-app protection like the macOS keychain's.
+- While Omdrop is receiving, the receiver holds the key in its own memory. Omdrop keeps it out of core dumps, and `identity lock` stops the receiver before clearing the cache.
+
 ## Privileges
 
 The radio helper, `/usr/lib/omdrop/omdrop-discoverable`, runs as root through `pkexec`, because configuring AWDL needs vendor commands and raw frame transmission. The polkit action `org.omarchy.omdrop.discover` covers only that root-owned path. It needs no password from your own active session, and an administrator's password from remote or inactive sessions. The driver package installs both.
 
 The receiver runs as you, so received files are yours. The firewall rule is added with `sudo ufw` in the install terminal, which normally reuses the driver install's authentication.
 
-This computer's AirDrop identity is kept in `~/.omdrop/keys`: its certificate and key, and your Apple ID validation record if you've added one. If `~/.opendrop/keys` exists and `~/.omdrop` doesn't, Omdrop copies it there once and leaves the original in place for OpenDrop.
+The AirDrop identity is kept in `~/.omdrop/keys`, or in 1Password; see [Your AirDrop identity](#your-airdrop-identity). If `~/.opendrop/keys` exists and `~/.omdrop` doesn't, Omdrop copies it there once and leaves the original in place for OpenDrop.
+
+Protocol dumps for bug reports are off by default. `omdrop send --verbose` writes them to `$XDG_RUNTIME_DIR/omdrop/debug`, with validation records and certificates replaced by their size.
 
 ## Remove
 
@@ -122,6 +178,7 @@ omdrop firewall remove
 omdrop links remove
 omarchy plugin remove netmojo.omdrop
 sudo pacman -R brcmfmac-awdl-dkms
+omdrop identity lock                # clear a cached identity
 rm -rf ~/.omdrop                    # this computer's AirDrop identity
 ```
 

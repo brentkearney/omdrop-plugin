@@ -54,7 +54,7 @@ PROJ="$(cd "$(dirname "$SELF")/.." && pwd)"
 # A fallback that silently substitutes for the real value is the same class of
 # defect as a status line reporting a state that was never entered, so this one
 # says when it is guessing, and says when the two disagree.
-VERSION_FALLBACK=0.12.2
+VERSION_FALLBACK=0.13.0
 omdrop_version() {
   local dir manifest version= real
   real=$(readlink -f "$0" 2>/dev/null) || real="$0"
@@ -133,6 +133,13 @@ DEFAULT_SEND_WAIT=30
 # file. The watcher's own ExecStart carries the truth.
 WATCH=omdrop-watch
 
+# The identity commands, and the timer that turns a window off at the 1Password
+# cache's hard expiry: a kernel timeout clears the cache, but only stopping the
+# receiver clears the copy it loaded. See docs/identity-contract.md.
+identity_py() { python3 "$PROJ/bin/identity.py" "$@"; }
+ID_PY=identity_py
+ID_EXPIRY=omdrop-identity-expiry
+
 # omdrop's own settings live apart from the receiver's config.toml on purpose:
 # airdrop-serve.py validates that file against a fixed key list and refuses to
 # start on anything it does not recognise, so adding our keys there would stop
@@ -182,6 +189,16 @@ omdrop -- send and receive files with nearby Apple devices
                      In contacts mode only known senders may send to you.
   senders [add|remove ID | list]
                      manage the known-senders list (emails and phone numbers)
+  identity [status|unlock|lock]
+                    which identity Apple devices see. With the identity in
+                    1Password, `unlock` fetches it now and `lock` turns
+                    Omdrop off and clears the cached copy.
+  identity 1password import [--vault V] [--title T]
+                    move the Apple identity from ~/.omdrop/keys into
+                    1Password; the files are deleted only once 1Password
+                    holds an identical copy
+  identity 1password use ITEM | off
+                    use an identity already in 1Password, or stop using it
   setup             install what receiving needs: the service, the name Macs
                     see, this computer's certificate, and the handler that
                     opens received links on double-click. Safe to run again.
@@ -281,6 +298,7 @@ window_remaining() {
 cancel_window() {
   systemctl --user stop "$WINDOW.timer" >/dev/null 2>&1 || true
   systemctl --user stop "$WATCH.service" >/dev/null 2>&1 || true
+  systemctl --user stop "$ID_EXPIRY.timer" >/dev/null 2>&1 || true
 }
 
 # systemd time span -> whole seconds, for the radio primitive's argument.
@@ -412,8 +430,14 @@ plugin_dir() {
 # official-repository package that provides it. The probe names the API the
 # receiver calls, because an unrelated `libarchive` module would satisfy a bare
 # import and still fail on the first upload.
-RECEIVER_PKGS=python-libarchive-c
-receiver_libs_installed() { python3 -c 'from libarchive import stream_reader' >/dev/null 2>&1; }
+#
+# keyutils is the kernel keyring's library: the 1Password identity cache lives
+# in the keyring, and the receiver reads it through libkeyutils.
+RECEIVER_PKGS="python-libarchive-c keyutils"
+receiver_libs_installed() {
+  python3 -c 'from libarchive import stream_reader' >/dev/null 2>&1 \
+    && [[ -e /usr/lib/libkeyutils.so.1 ]]
+}
 
 # The identity this computer presents to Apple devices: its certificate and
 # key, and the Apple ID validation record when there is one. It lived in
@@ -456,22 +480,76 @@ prepare_identity() {
   return 0
 }
 
-# The certificate this computer identifies itself with, made here rather than
-# in the middle of somebody's first transfer: openssl takes a moment, and the
-# unit's start would be waiting on it while a sender is already knocking. The
-# receiver makes the same one if it ever starts without it. An existing
-# identity is never replaced.
+# The self-signed identity every mode falls back to, made here rather than in
+# the middle of somebody's first transfer: openssl takes a moment, and the
+# unit's start would be waiting on it while a sender is already knocking. It
+# is only ever created under the .self-signed.pem names, and never replaces a
+# file; an older install's self-signed pair under the Apple names is renamed
+# only when it is provably self-signed. See docs/identity-contract.md.
+# Returns 0 when it created the pair, 1 when there was nothing to do, 2 on
+# failure.
 ensure_tls() {
-  local keys="$IDENTITY_DIR/keys" out
-  [[ -r "$keys/certificate.pem" && -r "$keys/key.pem" ]] && return 1
-  (umask 077 && mkdir -p -- "$keys") || return 2
-  # openssl draws key-generation progress as rows of . + and *; on failure
-  # only its error lines are worth showing.
-  out=$(cd -- "$keys" && openssl req -newkey rsa:2048 -nodes -keyout key.pem \
-          -x509 -days 365 -out certificate.pem -subj "/CN=$(effective_name)" 2>&1) \
-    || { grep -v '^[.+*]*$' <<<"$out" >&2; return 2; }
-  [[ -r "$keys/certificate.pem" && -r "$keys/key.pem" ]] || return 2
+  "$ID_PY" ensure-self-signed --name "$(effective_name)" >/dev/null
+}
+
+# The identity lock, shared with bin/identity.py. `on` holds it from the check
+# that no `off` ran during a 1Password fetch until the receiver and radio are
+# up, and `off` holds it throughout, so the two can never interleave. Fixed
+# descriptor 8: anything long-lived started under it gets `8>&-`, so a radio
+# supervisor cannot inherit the lock and hold it for the life of the window.
+identity_lock() {
+  local dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/omdrop"
+  (umask 077 && mkdir -p -- "$dir") || die "omdrop could not create $dir"
+  exec 8>"$dir/identity.lock" || die "omdrop could not open its identity lock"
+  flock 8
+}
+identity_unlock() { exec 8>&-; }
+
+# A notice from the identity step, on stderr and as a toast: falling back to
+# the self-signed identity changes who can see this computer.
+identity_notice() {
+  local msg=$1
+  printf '%s\n' "$msg" >&2
+  command -v omarchy-notification-send >/dev/null 2>&1 \
+    && omarchy-notification-send -t 8000 "Omdrop" "$msg" >/dev/null 2>&1
   return 0
+}
+
+# `omdrop identity`: which identity this computer presents, and 1Password.
+cmd_identity() {
+  local sub=${1:-status}
+  case "$sub" in
+    status) shift || true; "$ID_PY" status "$@" ;;
+    unlock) "$ID_PY" unlock ;;
+    lock)
+      # Turn off first: a running receiver holds the key in its memory, and
+      # revoking the cache cannot reach that copy.
+      if receiving || [[ -e "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/omdrop/window" ]]; then
+        cmd_off >/dev/null
+      fi
+      "$ID_PY" lock ;;
+    1password)
+      shift
+      case "${1:-}" in
+        import) shift; driver_identity_ready; "$ID_PY" import "$@" ;;
+        use)    shift; driver_identity_ready; "$ID_PY" use "$@" ;;
+        off)    "$ID_PY" 1password-off ;;
+        *) die "usage: omdrop identity 1password import [--vault V] [--title T] | use ITEM [--vault V] | off" ;;
+      esac ;;
+    *) die "usage: omdrop identity [status [--json] | unlock | lock | 1password ...]" ;;
+  esac
+}
+
+# Moving the Apple identity off disk needs a driver whose sender follows the
+# identity contract. An older sender finds certificate.pem missing and makes
+# a self-signed pair under the Apple identity's names.
+driver_identity_ready() {
+  local installed
+  installed=$(pacman -Q "$DRIVER_PKG" 2>/dev/null) || installed=
+  installed=${installed##* }
+  if [[ -z "$installed" ]] || (( $(vercmp "$installed" "$DRIVER_IDENTITY_VERSION") < 0 )); then
+    die "Keeping the identity in 1Password needs driver $DRIVER_IDENTITY_VERSION or newer (installed: ${installed:-none}). Update it with: omdrop install-driver"
+  fi
 }
 
 # Write the receiving service from this plugin's template when the installed
@@ -631,7 +709,7 @@ prereqs_missing() {
     return 0
   fi
   receiver_libs_installed \
-    || printf 'library\t%s\n' "The Python library the receiver needs, $RECEIVER_PKGS, is not installed. The button below installs it along with the driver."
+    || printf 'library\t%s\n' "Packages the receiver needs ($RECEIVER_PKGS) are not installed. The button below installs them along with the driver."
   if [[ ! -x "$DISCOVERABLE" ]]; then
     printf 'driver\t%s\n' "The Wi-Fi driver that makes this computer visible to Apple devices is not installed. It has to be installed as an administrator."
   elif [[ ! -e /sys/class/net/awdl0 ]]; then
@@ -657,9 +735,16 @@ print(json.dumps({"ready": not rows,
   if (( ${#missing[@]} )); then
     printf 'Not ready to receive yet:\n'
     printf -- '  - %s\n' "${missing[@]#*$'\t'}"
-    return 0
+  else
+    printf 'Ready to receive.\n'
   fi
-  printf 'Ready to receive.\n'
+  # Which identity Apple devices will see, and anything left behind. Reported,
+  # never repaired here: `omdrop off` is the one thing that clears a window.
+  printf '\n'
+  "$ID_PY" status 2>/dev/null || printf 'The identity could not be read.\n'
+  if [[ -e "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/omdrop/window" ]] && ! receiving; then
+    printf 'A window'"'"'s identity file remains although nothing is receiving. Clear it with: omdrop off\n'
+  fi
 }
 
 # AirDrop data reaches the ordinary user receiver through one kernel socket.
@@ -723,12 +808,15 @@ DRIVER_PKG=brcmfmac-awdl-dkms
 # checkout below is detached at this SHA and the build only runs if it
 # succeeded. Bump it, in the same commit, whenever the plugin needs a newer
 # driver: the full 40 characters, because a short SHA is not a pin.
-DRIVER_COMMIT=70a43051aad928ec44bda73ac6e850c078b0be79
+DRIVER_COMMIT=80c9a0ead1b4b468227bc461b23448ed1a039727
 # The package version that commit builds, with its pkgrel. install-driver
 # rebuilds any older installed driver: a fix inside the helper, such as 0.5.1's,
 # changes nothing a feature probe could see, and a packaging fix such as
 # 0.6.3-2's (the kernel headers became a dependency) changes only the pkgrel.
-DRIVER_VERSION=0.6.4
+DRIVER_VERSION=0.7.0
+# The first driver whose sender, send-to-peer and advertiser follow
+# docs/identity-contract.md. Moving the identity into 1Password needs it.
+DRIVER_IDENTITY_VERSION=0.7.0
 
 cmd_install_driver() {
   local self_q
@@ -787,7 +875,7 @@ else
   git clone --quiet $DRIVER_REPO '$src'
 fi
 echo 'Building driver commit $DRIVER_COMMIT'
-git -C '$src' checkout --detach 70a43051aad928ec44bda73ac6e850c078b0be79 && makepkg --dir '$src' -si"
+git -C '$src' checkout --detach 80c9a0ead1b4b468227bc461b23448ed1a039727 && makepkg --dir '$src' -si"
     fi
   fi
 
@@ -870,7 +958,54 @@ cmd_on() {
       || die "omdrop on: could not switch to $want_vis, so nothing was turned on."
   fi
 
+  # The identity is settled before anything starts, so a cancelled start has
+  # nothing to undo. `begin` makes sure the self-signed pair exists and, when
+  # the identity lives in 1Password and nothing usable is cached, fetches it:
+  # the one step that runs without the identity lock, so `off` can interrupt
+  # it. Then, under the lock, `window` refuses if an `off` ran meanwhile, and
+  # otherwise fixes this window's identity; the lock is held until the
+  # receiver and radio are up, so no `off` can slip in between.
+  local id_out id_seq id_source= id_expiry= line
+  id_out=$("$ID_PY" begin --name "$(effective_name)") \
+    || die "The AirDrop receiver would not start: this computer's identity is unusable."
+  while IFS= read -r line; do
+    case "$line" in
+      seq=*) id_seq=${line#seq=} ;;
+      notice=*) identity_notice "${line#notice=}" ;;
+    esac
+  done <<<"$id_out"
+  identity_lock
+  local id_rc=0
+  id_out=$("$ID_PY" window --seq "$id_seq") || id_rc=$?
+  if (( id_rc == 3 )); then
+    identity_unlock
+    echo "Omdrop was turned off while it was starting." >&2
+    return 0
+  fi
+  (( id_rc == 0 )) || die "The AirDrop receiver would not start: its identity could not be settled."
+  while IFS= read -r line; do
+    case "$line" in
+      source=*) id_source=${line#source=} ;;
+      expiry_in=*) id_expiry=${line#expiry_in=} ;;
+      notice=*) identity_notice "${line#notice=}" ;;
+    esac
+  done <<<"$id_out"
+  # Every way out of a failed start clears what `window` set up.
+  identity_abort() { "$ID_PY" stop-begin >/dev/null 2>&1; "$ID_PY" stop-end >/dev/null 2>&1; }
+
   cancel_window
+
+  # The 1Password cache's hard expiry is absolute: a window still open then is
+  # turned off, because a kernel timeout cannot reach a key the receiver has
+  # already loaded. Armed before anything starts, and a window that cannot arm
+  # it does not start: a bound that is only advice is not a bound.
+  if [[ "$id_source" == 1password && -n "$id_expiry" ]]; then
+    if ! systemd-run --user --quiet --on-active="$(( id_expiry > 0 ? id_expiry : 1 ))s" \
+         --unit="$ID_EXPIRY" "$SELF" off; then
+      identity_abort
+      die "The AirDrop receiver would not start: the identity cache's expiry could not be armed."
+    fi
+  fi
 
   # The watcher goes up BEFORE the radio and it carries the shape of the
   # window in its arguments, because `status` reads the mode off this unit: a
@@ -921,9 +1056,9 @@ cmd_on() {
     # prompting, so asking is free and never surprises anyone.
     if pkexec --disable-internal-agent "$DISCOVERABLE" status >/dev/null 2>&1; then
       out=$(spinner_while "waking the radio" \
-              pkexec "$DISCOVERABLE" start "${secs:-0}" 2>&1 >/dev/null); rc=$?
+              pkexec "$DISCOVERABLE" start "${secs:-0}" 8>&- 2>&1 >/dev/null); rc=$?
     else
-      out=$(pkexec "$DISCOVERABLE" start "${secs:-0}" 2>&1 >/dev/null); rc=$?
+      out=$(pkexec "$DISCOVERABLE" start "${secs:-0}" 8>&- 2>&1 >/dev/null); rc=$?
     fi
     # 5 is "already starting or already visible": a race with a window that is
     # already coming up, not a refusal. Anything else is a real failure.
@@ -951,6 +1086,9 @@ cmd_on() {
     unit_install "$plugin" || true
     prepare_identity >&2 || return 1
     ensure_tls; (( $? == 2 )) && return 1
+    # The unit may write opt-in protocol dumps only here (ReadWritePaths= with
+    # `-`, ignored when absent), and its sandbox cannot create the directory.
+    (umask 077 && mkdir -p -- "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/omdrop/debug") || true
     systemctl --user reset-failed "$UNIT" >/dev/null 2>&1 || true
     systemctl --user start "$UNIT"
   }
@@ -958,22 +1096,26 @@ cmd_on() {
   if (( receiver_first )); then
     if ! start_receiver; then
       cancel_window
+      identity_abort
       die "The AirDrop receiver would not start."
     fi
     if ! radio_up; then
       cancel_window
       systemctl --user stop "$UNIT" >/dev/null 2>&1
-      [[ -x "$DISCOVERABLE" ]] && pkexec "$DISCOVERABLE" stop >/dev/null 2>&1
+      [[ -x "$DISCOVERABLE" ]] && pkexec "$DISCOVERABLE" stop >/dev/null 2>&1 8>&-
+      identity_abort
       die "${RADIO_ERR:-The AirDrop radio could not be started.}"
     fi
   else
     if ! radio_up; then
       cancel_window
+      identity_abort
       die "${RADIO_ERR:-The AirDrop radio could not be started.}"
     fi
     if ! start_receiver; then
       cancel_window
-      [[ -x "$DISCOVERABLE" ]] && pkexec "$DISCOVERABLE" stop >/dev/null 2>&1
+      [[ -x "$DISCOVERABLE" ]] && pkexec "$DISCOVERABLE" stop >/dev/null 2>&1 8>&-
+      identity_abort
       die "The AirDrop receiver would not start."
     fi
   fi
@@ -986,19 +1128,28 @@ cmd_on() {
     timed)
       systemd-run --user --quiet --on-active="$dur" --unit="$WINDOW" "$SELF" off \
         || die "receiving, but the $dur window could not be armed -- turn it off yourself"
-      [[ -x "$DISCOVERABLE" ]] && pkexec "$DISCOVERABLE" start "$secs" >/dev/null 2>&1 ;;
+      [[ -x "$DISCOVERABLE" ]] && pkexec "$DISCOVERABLE" start "$secs" >/dev/null 2>&1 8>&- ;;
   esac
+
+  identity_unlock
 
   cmd_status
 }
 
 cmd_off() {
   require_unit
-  cancel_window
+  # Under the identity lock, in this order: nothing that starts later can
+  # publish into this window; the receiver stops before the identity it loaded
+  # is released; the window file goes last. See docs/identity-contract.md.
+  identity_lock
+  "$ID_PY" stop-begin
   systemctl --user stop "$UNIT" || die "The AirDrop receiver would not stop."
+  cancel_window
   # Stop advertising even if the receiver was already down: the two can drift
   # apart when something else stopped one of them.
-  [[ -x "$DISCOVERABLE" ]] && pkexec "$DISCOVERABLE" stop >/dev/null 2>&1
+  [[ -x "$DISCOVERABLE" ]] && pkexec "$DISCOVERABLE" stop >/dev/null 2>&1 8>&-
+  "$ID_PY" stop-end
+  identity_unlock
   cmd_status
 }
 
@@ -1352,7 +1503,9 @@ cmd_send() {
   local cmd=("$SENDER" --name "$(effective_name)" --wait "$wait" --mac "$PEER" -- "${files[@]}")
 
   if (( verbose )); then
-    run_cancellable "${cmd[@]}"
+    # Verbose is for bug reports: the protocol log, and redacted dumps of each
+    # request and answer in the runtime directory (docs/identity-contract.md).
+    OMDROP_DEBUG=1 run_cancellable "${cmd[@]}"
     return
   fi
   run_cancellable send_narrated
@@ -1965,6 +2118,7 @@ cmd_dir() {
     echo "ReadWritePaths="
     echo "ReadWritePaths=$new"
     echo "ReadWritePaths=%h/.omdrop"
+    echo "ReadWritePaths=-%t/omdrop/debug"
   } > "$dropin/10-download-dir.conf"
   systemctl --user daemon-reload
 
@@ -2149,6 +2303,7 @@ case "${1:-status}" in
   limit)  shift; cmd_limit "$@" ;;
   visibility|vis|viz) shift; cmd_visibility "$@" ;;
   senders) shift; cmd_senders "$@" ;;
+  identity) shift; cmd_identity "$@" ;;
   setup)  shift; cmd_setup "$@" ;;
   doctor) shift; cmd_doctor "$@" ;;
   links)  shift; cmd_links "$@" ;;

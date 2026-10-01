@@ -38,6 +38,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import contacts  # noqa: E402  -- sibling module, found via the line above
+import debugdump  # noqa: E402
+import identity  # noqa: E402
+
+# The identity's key is loaded into this process for the life of the window;
+# keep it out of core dumps and away from same-UID ptrace.
+identity.not_dumpable()
 
 
 # Path separators, NUL, control characters (Cc) and format characters (Cf:
@@ -132,9 +138,9 @@ ap.add_argument('--name', default=None,
                 help='ReceiverComputerName: the label under the tile in the Mac sheet (config: name)')
 ap.add_argument('--model', default=None,
                 help='ReceiverModelName: Apple model identifier; picks the device glyph the sheet draws (config: model)')
-ap.add_argument('--keys', default=os.path.join(pwd.getpwuid(os.getuid()).pw_dir, '.omdrop'),
-                help='identity dir holding keys/certificate.pem and keys/key.pem (a self-signed '
-                     'pair is created if absent) and, optionally, keys/validation_record.cms')
+ap.add_argument('--keys', default=None,
+                help='replace ~/.omdrop for the identity files: DIR/keys holds the on-disk '
+                     'identity and the self-signed pair (see docs/identity-contract.md)')
 ap.add_argument('--outdir', default=None,
                 help='where received files go (config: download_dir)')
 ap.add_argument('--max-receive-percent', type=int, default=None,
@@ -208,9 +214,15 @@ class ThreadingHTTPServerV6(ThreadingHTTPServer):
         # sharingd closes the keep-alive TLS session with a RST once the
         # transfer is done (211010Z); the resulting ECONNRESET on the next
         # readline is the normal end of a session, not a fault.
-        if isinstance(sys.exc_info()[1], ConnectionResetError):
+        if isinstance(sys.exc_info()[1], (ConnectionResetError, HandshakeFailed)):
             return
         super().handle_error(request, client_address)
+
+
+# Raised by Handler.setup once a failed handshake is logged, so handle_error
+# does not add a traceback for what is usually a sender leaving the link.
+class HandshakeFailed(Exception):
+    pass
 
 
 KIB = 1024
@@ -636,9 +648,19 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
 
     def setup(self):
-        # Applies to request headers and every body read. A peer that stops
-        # transmitting cannot hold one server thread forever.
+        # Applies to the TLS handshake, request headers and every body read. A
+        # peer that stops transmitting cannot hold one server thread forever.
         self.request.settimeout(READ_IDLE_TIMEOUT_SECONDS)
+        # The handshake runs here, on this connection's own thread, not in
+        # accept(): there, one sender that dropped off the link mid-handshake
+        # stopped every later connection from being accepted for the rest of
+        # the window (2026-09-30 17:13Z: backlog full, iPhone never answered).
+        try:
+            self.request.do_handshake()
+        except OSError as e:
+            logging.info('TLS handshake with [%s]:%s failed: %s',
+                         self.client_address[0], self.client_address[1], e)
+            raise HandshakeFailed from e
         super().setup()
 
     def handle_expect_100(self):
@@ -888,54 +910,32 @@ class Handler(BaseHTTPRequestHandler):
 # ------------------------------------------------------------------ identity
 #
 # The certificate this machine presents and the Apple ID validation record
-# that lets a Contacts Only sender recognise it, in the layout every install
-# already has under --keys. The sender reads the same files.
-KEY_DIR = os.path.join(args.keys, 'keys')
-CERT_FILE = os.path.join(KEY_DIR, 'certificate.pem')
-KEY_FILE = os.path.join(KEY_DIR, 'key.pem')
-RECORD_FILE = os.path.join(KEY_DIR, 'validation_record.cms')
-# The latest Discover and Ask exchange, request and answer, one file each: what
-# a device actually sent, for when one misbehaves.
-DEBUG_DIR = os.path.join(args.keys, 'debug')
+# that lets a Contacts Only sender recognise it. Chosen once, at start, by the
+# rules in docs/identity-contract.md, which the driver's sender follows too:
+# from the 1Password cache, the files in ~/.omdrop/keys, or the self-signed
+# pair, which is created here if it is missing. Within a window the choice is
+# the window's; if that identity is unavailable this refuses to start rather
+# than presenting a different one.
+USER = identity.User(keys_dir=args.keys)
+try:
+    IDENTITY = identity.resolve(USER, name=NAME)
+except identity.IdentityError as e:
+    raise SystemExit(f'no usable identity: {e}')
+for warning in IDENTITY.warnings:
+    logging.warning('identity: %s', warning)
+RECORD_DATA = IDENTITY.record
+logging.info('identity: %s%s', IDENTITY.kind,
+             f', Apple ID validation record {len(RECORD_DATA)} bytes' if RECORD_DATA else '')
 
 
 def write_debug(data, name):
-    os.makedirs(DEBUG_DIR, exist_ok=True)
-    with open(os.path.join(DEBUG_DIR, name), 'wb') as fh:
-        fh.write(data)
-
-
-def ensure_certificate():
-    """`omdrop setup` creates the certificate before the first start; this
-    covers one deleted since. Same command, same place, same name."""
-    if os.path.exists(CERT_FILE) and os.path.exists(KEY_FILE):
-        return
-    logging.info('no certificate in %s; creating a self-signed one', KEY_DIR)
-    for d in (args.keys, KEY_DIR):
-        os.makedirs(d, mode=0o700, exist_ok=True)
-    made = subprocess.run(
-        ['openssl', 'req', '-newkey', 'rsa:2048', '-nodes', '-keyout', 'key.pem',
-         '-x509', '-days', '365', '-out', 'certificate.pem', '-subj', f'/CN={NAME}'],
-        cwd=KEY_DIR, capture_output=True)
-    if made.returncode != 0:
-        # Key-generation progress is rows of . + and *; keep the error lines.
-        errors = [line for line in made.stderr.decode(errors='replace').splitlines()
-                  if line.strip('.+*')]
-        raise SystemExit(f'openssl could not create a certificate in {KEY_DIR}: '
-                         + ' / '.join(errors))
+    """The latest exchange of each kind, for when a device misbehaves; opt-in."""
+    debugdump.dump(name, data)
 
 
 APPLE_ROOT = contacts.apple_root_ca()
 if APPLE_ROOT is None:
     raise SystemExit(f'Apple root CA certificate missing: {contacts.APPLE_ROOT_CA}')
-ensure_certificate()
-try:
-    with open(RECORD_FILE, 'rb') as fh:
-        RECORD_DATA = fh.read()
-    logging.info('Apple ID validation record: %d bytes', len(RECORD_DATA))
-except FileNotFoundError:
-    RECORD_DATA = None
-    logging.info('no Apple ID validation record in %s', KEY_DIR)
 
 # ----------------------------------------------------------------------- TLS
 #
@@ -982,7 +982,7 @@ PEERCERT_DIR = os.environ.get('OMDROP_PEERCERT')
 def tls_context():
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.minimum_version = max(ctx.minimum_version, ssl.TLSVersion.TLSv1_1)
-    ctx.load_cert_chain(CERT_FILE, keyfile=KEY_FILE)
+    identity.load_into(ctx, IDENTITY)
     ctx.load_verify_locations(cafile=APPLE_ROOT)
     ctx.verify_mode = ssl.CERT_NONE
     if contacts.visibility() != 'contacts' and not PEERCERT_DIR:
@@ -1081,7 +1081,8 @@ if server is None:
     logging.error('port %d is still held by something else after waiting; '
                   'the announcer only ever names %d', args.port, args.port)
     sys.exit(1)
-server.socket = tls_context().wrap_socket(server.socket, server_side=True)
+server.socket = tls_context().wrap_socket(server.socket, server_side=True,
+                                          do_handshake_on_connect=False)
 logging.info('config %s: %s', args.config, ', '.join(f'{k}={v!r}' for k, v in sorted(_cfg.items())) or 'absent (defaults)')
 logging.info('serving %s._airdrop._tcp.local as %s (%s) on [%s]:%d, receiving into %s',
              sid, NAME, MODEL, IFACE_ADDR, args.port, DEST)
