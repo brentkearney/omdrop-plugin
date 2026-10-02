@@ -168,7 +168,9 @@ class ExistingIdentityTests(ReceiverFixture):
         self.assertEqual(answer["ReceiverModelName"], MODEL)
         # Without the record a Contacts Only sender cannot recognise us.
         self.assertEqual(answer["ReceiverRecordData"], self.record)
-        self.assertEqual(json.loads(answer["ReceiverMediaCapabilities"]), {"Version": 1})
+        caps = json.loads(answer["ReceiverMediaCapabilities"])
+        self.assertEqual(caps["Version"], 3)
+        self.assertIn("Codecs", caps)
 
     def test_ask_then_upload_on_one_connection_stores_the_files(self):
         conn = self.connection()
@@ -180,7 +182,8 @@ class ExistingIdentityTests(ReceiverFixture):
         status, body = self.post(conn, "/Ask", ask)
         self.assertEqual(status, 200)
         self.assertEqual(set(plistlib.loads(body)),
-                         {"ReceiverComputerName", "ReceiverModelName", "ReceiverMediaCapabilities"})
+                         {"ReceiverComputerName", "ReceiverModelName",
+                          "ReceiverMediaCapabilities", "IsAirDropable"})
 
         status, _ = self.post(conn, "/Upload", dvzip([("hello.txt", b"hello world\n")]),
                               {"Content-Type": "application/x-dvzip", "TransferID": "T1",
