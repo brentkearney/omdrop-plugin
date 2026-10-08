@@ -555,6 +555,14 @@ cmd_identity() {
 # a self-signed pair under the Apple identity's names.
 driver_identity_ready() {
   local installed
+  if radio_probe; then
+    # A backend states which omdrop-awdl helper contract it follows.
+    installed=$(probe_field contract)
+    if [[ -z "$installed" ]] || (( $(vercmp "$installed" "$DRIVER_IDENTITY_VERSION") < 0 )); then
+      die "Keeping the identity in 1Password needs a radio backend that follows contract $DRIVER_IDENTITY_VERSION or newer ($(probe_field backend) follows ${installed:-none})."
+    fi
+    return 0
+  fi
   installed=$(pacman -Q "$DRIVER_PKG" 2>/dev/null) || installed=
   installed=${installed##* }
   if [[ -z "$installed" ]] || (( $(vercmp "$installed" "$DRIVER_IDENTITY_VERSION") < 0 )); then
@@ -708,16 +716,70 @@ cmd_setup() {
 # building a kernel module there only fails.
 apple_broadcom_wifi() {
   local d
-  for d in /sys/bus/pci/devices/*; do
+  # OMDROP_SYSFS lets the tests describe the hardware instead of depending on
+  # the machine they run on.
+  for d in "${OMDROP_SYSFS:-/sys}"/bus/pci/devices/*; do
     [[ "$(cat "$d/vendor" 2>/dev/null)" == 0x14e4 && "$(cat "$d/class" 2>/dev/null)" == 0x0280* ]] && return 0
   done
   return 1
 }
 
+# The radio half is a separate package: omdrop-awdl for Apple's Broadcom Wi-Fi,
+# or another radio backend. A backend may describe itself through
+# `omdrop-discoverable probe --json`, run unprivileged (docs/radio-backend.md).
+# One that does owns the hardware and installation checks for its own radio;
+# one that does not is taken to be omdrop-awdl on Apple's Broadcom Wi-Fi and
+# gets the checks below, unchanged. omdrop-awdl answers a subcommand it does
+# not know with its usage and exit 2, which is how it reads as "no probe".
+RADIO_PROBE=
+radio_probe() {
+  if [[ -z "$RADIO_PROBE" ]]; then
+    RADIO_PROBE=none
+    local out
+    if [[ -x "$DISCOVERABLE" ]] \
+        && out=$("$DISCOVERABLE" probe --json 2>/dev/null) \
+        && printf '%s' "$out" | python3 -c 'import json, sys; assert isinstance(json.load(sys.stdin), dict)' 2>/dev/null; then
+      RADIO_PROBE=$out
+    fi
+  fi
+  [[ "$RADIO_PROBE" != none ]]
+}
+
+# One field of the probe as text: strings as they are, booleans as true/false,
+# anything absent as nothing.
+probe_field() {
+  PROBE="$RADIO_PROBE" python3 -c '
+import json, os, sys
+v = json.loads(os.environ["PROBE"]).get(sys.argv[1])
+print("" if v is None else str(v).lower() if isinstance(v, bool) else v)' "$1"
+}
+
+# The backend's blockers, in its order, as prereqs_missing lines.
+probe_missing() {
+  PROBE="$RADIO_PROBE" python3 -c '
+import json, os
+for m in json.loads(os.environ["PROBE"]).get("missing") or []:
+    if isinstance(m, dict) and m.get("id") and m.get("say"):
+        print("%s\t%s" % (m["id"], " ".join(str(m["say"]).split())))'
+}
+
 prereqs_missing() {
+  if radio_probe; then
+    # Hardware the backend cannot drive is, again, first and alone.
+    if [[ "$(probe_field hardware)" == false ]]; then
+      probe_missing | grep '^hardware' \
+        || printf 'hardware\t%s\n' "This computer's Wi-Fi is not one the installed radio backend ($(probe_field backend)) can drive."
+      return 0
+    fi
+    probe_missing
+    receiver_libs_installed \
+      || printf 'library\t%s\n' "Packages the receiver needs ($RECEIVER_PKGS) are not installed. The button below installs them."
+    have_unit || printf 'service\t%s\n' "The service that receives files is not installed yet. Turning Omdrop on installs it."
+    return 0
+  fi
   # First, and alone: nothing else on this list can be fixed on this machine.
   if ! apple_broadcom_wifi; then
-    printf 'hardware\t%s\n' "This computer has no Apple Broadcom Wi-Fi, which AirDrop needs. Omdrop runs only on Apple Silicon Macs, not in a virtual machine."
+    printf 'hardware\t%s\n' "This computer has no Apple Broadcom Wi-Fi, which Omdrop's own driver needs: it runs only on Apple Silicon Macs, not in a virtual machine. Other Wi-Fi cards need a different radio backend (docs/radio-backend.md)."
     return 0
   fi
   receiver_libs_installed \
@@ -833,6 +895,10 @@ DRIVER_IDENTITY_VERSION=0.7.0
 cmd_install_driver() {
   local self_q
   printf -v self_q '%q' "$0"
+  if radio_probe; then
+    install_for_backend
+    return
+  fi
   if [[ -x "$DISCOVERABLE" ]] && driver_current && receiver_libs_installed; then
     echo "The driver and the Python library the receiver needs are both installed and current. Nothing to do."
     return 0
@@ -915,10 +981,41 @@ $self_q firewall install"
   # Tested on its own line, not with `||`: bash ignores `set -e` inside a
   # subshell whose status a `||` is testing, so every step would run on
   # regardless of the ones before it failing.
+  launch_install "$build" "Omdrop requires a patched wifi driver, which requires administrative privilege to install. You will be prompted for your password."
+}
+
+# With a radio backend that probes, the radio is that package's business: it
+# is installed (it answered), and it reports its own blockers through doctor.
+# What remains is this plugin's own part, the receiver's packages and its
+# firewall rule, run the same way as the driver install.
+install_for_backend() {
+  local build="set -e"
+  receiver_libs_installed || build="$build
+sudo pacman -S --needed --asdeps $RECEIVER_PKGS"
+  ufw_active && build="$build
+$self_q firewall install"
+  if [[ "$build" == "set -e" ]]; then
+    echo "The receiver's packages are installed and the radio comes from $(probe_field backend) $(probe_field version). Nothing to do."
+    return 0
+  fi
+  if ! command -v omarchy-launch-floating-terminal-with-presentation >/dev/null 2>&1; then
+    echo "Install what the receiver needs with:"
+    printf '\n%s\n\n' "$build"
+    return 0
+  fi
+  echo "Opening a terminal to install what the receiver needs."
+  launch_install "$build" "Omdrop needs a few packages for its receiver, which requires administrative privilege to install. You will be prompted for your password."
+}
+
+# Run an install script in a floating terminal the user watches. A subshell,
+# so a failed step ends the script and not the terminal: with `set -e` at the
+# launcher's top level, the first failure closed the window before anyone
+# could read it. Exit 130 skips the launcher's "Done!".
+launch_install() {
+  local build=$1 intro=$2
   local script="( $build
 ); rc=\$?; if [ \$rc -ne 0 ]; then echo; echo \"Installing failed (exit \$rc). The messages above say why.\"; read -rsn 1 -p 'Press any key to close...' </dev/tty; echo; exit 130; fi"
-  omarchy-launch-floating-terminal-with-presentation \
-    "echo 'Omdrop requires a patched wifi driver, which requires administrative privilege to install. You will be prompted for your password.'; echo; $script"
+  omarchy-launch-floating-terminal-with-presentation "echo '$intro'; echo; $script"
 }
 
 cmd_on() {
