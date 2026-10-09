@@ -136,7 +136,31 @@ def usable_for_new_window(payload):
 
 
 class FetchFailed(Exception):
-    pass
+    """Why 1Password gave nothing. str() is short enough for a notification;
+    `detail` keeps what 1Password itself said, for the command line."""
+
+    def __init__(self, message, detail=''):
+        super().__init__(message)
+        self.detail = detail
+
+
+def describe(e):
+    detail = getattr(e, 'detail', '')
+    return f'{e} ({detail})' if detail else str(e)
+
+
+# op's own errors name an op:// path and a client library; what the person
+# can act on is which of these happened.
+def plain_op_error(message):
+    m = message.lower()
+    if 'prompt dismissed' in m:
+        return '1Password prompt dismissed'
+    if any(s in m for s in ('locked', 'initializing client', 'desktop app',
+                            'signed in', 'sign in', 'session expired')):
+        return '1Password locked'
+    if any(s in m for s in ("isn't an item", "isn't a field", 'could not find', 'no item')):
+        return 'The 1Password item is missing or incomplete'
+    return '1Password could not provide the identity'
 
 
 def op_binary():
@@ -153,10 +177,10 @@ def op_run(user, args, deadline, input=None):
     """
     op = op_binary()
     if not op:
-        raise FetchFailed('1Password CLI (op) is not installed')
+        raise FetchFailed('1Password CLI (op) not installed')
     left = deadline - time.monotonic()
     if left <= 0:
-        raise FetchFailed(f'1Password did not answer within {FETCH_SECONDS} s')
+        raise FetchFailed('1Password did not answer', f'no answer within {FETCH_SECONDS} s')
     proc = subprocess.Popen([op, *args], stdin=subprocess.PIPE if input else subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     ident._write_private(_fetch_pid_path(user), f'{proc.pid}\n')
@@ -165,21 +189,21 @@ def op_run(user, args, deadline, input=None):
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.communicate()
-        raise FetchFailed(f'1Password did not answer within {FETCH_SECONDS} s')
+        raise FetchFailed('1Password did not answer', f'no answer within {FETCH_SECONDS} s')
     finally:
         try:
             os.unlink(_fetch_pid_path(user))
         except FileNotFoundError:
             pass
     if proc.returncode < 0:
-        raise FetchFailed('the 1Password request was cancelled')
+        raise FetchFailed('1Password request cancelled')
     if proc.returncode != 0:
         import re
         detail = err.decode(errors='replace').strip().splitlines()
         reason = detail[-1] if detail else f'exit {proc.returncode}'
         # op writes "[ERROR] 2026/09/28 23:06:41 message"; keep the message.
         reason = re.sub(r'^\[\w+\]\s+\d{4}/\d\d/\d\d \d\d:\d\d:\d\d\s+', '', reason)[:300]
-        raise FetchFailed(f'1Password: {reason}')
+        raise FetchFailed(plain_op_error(reason), reason)
     return out
 
 
@@ -188,7 +212,8 @@ def item_ref(user):
     account, vault, item = (s.get(k, '') for k in
                             ('identity_op_account', 'identity_op_vault', 'identity_op_item'))
     if not (vault and item):
-        raise FetchFailed('no 1Password item is configured (run: omdrop identity 1password import)')
+        raise FetchFailed('No 1Password item configured',
+                          'run: omdrop identity 1password import')
     return account, vault, item
 
 
@@ -210,7 +235,7 @@ def fetch(user):
     problem = ident.check_apple(files['certificate.pem'], files['key.pem'],
                                 files['validation_record.cms'])
     if problem:
-        raise FetchFailed(problem)
+        raise FetchFailed('The Apple identity in 1Password is unusable', problem)
     t0 = now()
     t2 = t0 + ident.MAX_LIFETIME
     t1 = min(t0 + cache_hours(user) * 3600, t2)
@@ -232,17 +257,18 @@ def publish_if_current(user, payload, generation):
 
 
 def fill_cache(user):
-    """Fetch and publish unless a usable cache exists. Returns an outcome and reason."""
+    """Fetch and publish unless a usable cache exists. Returns an outcome and
+    the exception that stopped it, if any."""
     with ident._Flock(user.lock):
         generation = counter(user, 'gen')
     try:
         payload = fetch(user)
     except FetchFailed as e:
-        return 'failed', str(e)
+        return 'failed', e
     try:
-        return publish_if_current(user, payload, generation), ''
+        return publish_if_current(user, payload, generation), None
     except ident.KeyringError as e:
-        return 'failed', str(e)
+        return 'failed', e
 
 
 # ------------------------------------------------------------------ window commands
@@ -262,10 +288,10 @@ def cmd_begin(args, user):
         return 0
     if isinstance(ident.read_window(user), dict):
         return 0                         # a repeated `on`: the window keeps its identity
-    outcome, reason = fill_cache(user)
+    outcome, err = fill_cache(user)
     if outcome == 'failed':
-        say(notice=f'Using the self-signed identity: {reason}. '
-                   "Contacts Only devices won't see or accept this computer.")
+        reason = str(err) if isinstance(err, FetchFailed) else 'Could not cache the Apple identity'
+        say(notice=f'{reason}; using self-signed certificates. Peers must be in "Everyone" mode.')
     return 0
 
 
@@ -298,8 +324,9 @@ def cmd_window(args, user):
             if disk['record']:
                 problem = ident.check_apple(cert, key, ident._read(user.path('validation_record.cms'), 'rb'))
             if problem:
-                say(notice=f'Using the self-signed identity: {problem}. '
-                           "Contacts Only devices won't see or accept this computer.")
+                say(notice='Apple identity unusable; using self-signed certificates. '
+                           'Peers must be in "Everyone" mode.')
+                warn(f'omdrop: the Apple identity on disk is unusable: {problem}')
             else:
                 lines = ['source=disk']
                 say(source='disk')
@@ -359,12 +386,12 @@ def cmd_unlock(args, user):
     if current_cache(user) is not None:
         warn('The identity cache is already filled.')
         return 0
-    outcome, reason = fill_cache(user)
+    outcome, err = fill_cache(user)
     if outcome == 'published':
         warn('Fetched the AirDrop identity from 1Password.')
         return 0
     warn({'superseded': 'Cancelled: the identity settings changed meanwhile.',
-          'window-open': 'Turn Omdrop off first.'}.get(outcome, f'Could not fetch: {reason}'))
+          'window-open': 'Turn Omdrop off first.'}.get(outcome, f'Could not fetch: {describe(err)}'))
     return 1
 
 
@@ -542,7 +569,7 @@ def cmd_import(args, user):
                      'Run the import again to finish.')
                 return 1
     except FetchFailed as e:
-        warn(f'{e}; nothing was deleted.')
+        warn(f'{describe(e)}; nothing was deleted.')
         return 1
     except Superseded as e:
         warn(f'{e} Nothing was deleted.')
@@ -575,7 +602,7 @@ def cmd_use(args, user):
         account = args.account or account_id(user, deadline)
         files = op_read_files(user, account, vault, item, deadline)
     except FetchFailed as e:
-        warn(str(e))
+        warn(describe(e))
         return 1
     problem = ident.check_apple(files['certificate.pem'], files['key.pem'],
                                 files['validation_record.cms'])

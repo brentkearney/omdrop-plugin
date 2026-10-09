@@ -223,10 +223,19 @@ class OnePasswordWindowTests(LifecycleFixture):
         os.environ['OP_STUB_FAIL'] = 'authorization prompt dismissed, please try again'
         rc, begun, win = self.on()
         self.assertEqual(rc, 0)
-        self.assertIn('authorization prompt dismissed', begun['notice'])
-        self.assertIn("Contacts Only devices won't see", begun['notice'])
+        self.assertEqual(begun['notice'], '1Password prompt dismissed; using self-signed '
+                                          'certificates. Peers must be in "Everyone" mode.')
         self.assertEqual(win['source'], 'self-signed')
         self.assertNotIn('payload', FakeKeyring.store)
+
+    def test_a_locked_1password_is_named_without_its_error_text(self):
+        os.environ['OP_STUB_FAIL'] = ("could not read secret 'op://vault1/item1/certificate': "
+                                      'error initializing client: connecting to desktop app: '
+                                      'connection reset')
+        _, begun, win = self.on()
+        self.assertTrue(begun['notice'].startswith('1Password locked; using self-signed'))
+        self.assertNotIn('op://', begun['notice'])
+        self.assertEqual(win['source'], 'self-signed')
 
     def test_without_the_cli_the_notice_says_so(self):
         os.environ['OMDROP_OP'] = str(Path(self.tmp.name) / 'no-such-op')
@@ -239,7 +248,7 @@ class OnePasswordWindowTests(LifecycleFixture):
     def test_an_identity_that_fails_its_checks_is_never_cached(self):
         self.apple_problem = 'validation record has expired'
         _, begun, win = self.on()
-        self.assertIn('validation record has expired', begun['notice'])
+        self.assertIn('Apple identity in 1Password is unusable', begun['notice'])
         self.assertNotIn('payload', FakeKeyring.store)
         self.assertEqual(win['source'], 'self-signed')
 
@@ -474,7 +483,7 @@ class WindowSourceTests(LifecycleFixture):
         self.apple_problem = 'validation record has expired'
         _, _, win = self.on()
         self.assertEqual(win['source'], 'self-signed')
-        self.assertIn('validation record has expired', win['notice'])
+        self.assertTrue(win['notice'].startswith('Apple identity unusable; using self-signed'))
 
     def test_self_signed_mode_never_uses_the_disk_identity(self):
         for name, data in self.apple.items():
