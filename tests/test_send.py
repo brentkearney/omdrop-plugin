@@ -68,6 +68,7 @@ if [ "$1" = --list ]; then
   exit 0
 fi
 [ -n "$SENDER_STDOUT" ] && printf '%s\\n' "$SENDER_STDOUT"
+[ -n "$SENDER_STDERR" ] && printf '%s\\n' "$SENDER_STDERR" >&2
 # A sender still waiting for the device, which leaves a mark if it outlives
 # the send that started it. It ignores TERM, as the real one can.
 if [ -n "$SENDER_SLEEP" ]; then trap '' TERM; sleep "$SENDER_SLEEP"; : > "$CAPTURE.outlived"; fi
@@ -272,6 +273,48 @@ class SendCommandTests(SenderFixture):
         self.assertEqual(result.returncode, 3)
         self.assertIn("declined", result.stderr)
 
+    def unreachable_with(self, window, source):
+        root = Path(self.tmp.name)
+        runtime = root / "runtime"
+        (runtime / "omdrop").mkdir(parents=True)
+        (runtime / "omdrop" / "window").write_text(f"source={window}\n")
+        (root / "config" / "omdrop").mkdir(parents=True, exist_ok=True)
+        (root / "config" / "omdrop" / "settings").write_text(f"identity_source={source}\n")
+        self.env.update(
+            XDG_RUNTIME_DIR=str(runtime),
+            SENDER_STDOUT="",
+            SENDER_STDERR="e2:9d:03:6c:58:23 never opened 8770; on an iPhone, "
+                          "open a share sheet or receive something to wake sharingd",
+            SENDER_RC="3",
+        )
+        return self.run_omdrop("send", str(self.file))
+
+    def test_an_unreachable_device_with_1password_locked_says_everyone_mode(self):
+        result = self.unreachable_with("self-signed", "1password")
+
+        self.assertEqual(result.returncode, 3)
+        self.assertEqual(
+            result.stderr.strip().splitlines()[-1],
+            '1Password locked; using self-signed certificates. Peers must be in "Everyone" mode.',
+        )
+        self.assertNotIn("8770", result.stderr)
+
+    def test_an_unreachable_device_without_1password_says_everyone_mode(self):
+        result = self.unreachable_with("self-signed", "disk")
+
+        self.assertEqual(result.returncode, 3)
+        self.assertEqual(
+            result.stderr.strip().splitlines()[-1],
+            'Using self-signed certificates. Peers must be in "Everyone" mode.',
+        )
+
+    def test_an_unreachable_device_with_an_apple_identity_is_not_blamed_on_the_mode(self):
+        result = self.unreachable_with("1password", "1password")
+
+        self.assertEqual(result.returncode, 3)
+        self.assertNotIn("Everyone", result.stderr)
+        self.assertNotIn("8770", result.stderr)
+
     def test_cancelling_a_send_stops_the_sender_too(self):
         self.env["SENDER_SLEEP"] = "5"  # longer than the 2 s grace before SIGKILL
         proc = subprocess.Popen([OMDROP, "send", str(self.file)], env=self.env,
@@ -289,6 +332,23 @@ class SendCommandTests(SenderFixture):
         self.assertIn("Cancelled", err)
         self.assertFalse(Path(f"{self.capture}.outlived").exists(),
                          "the sender kept going after the send was cancelled")
+
+    def test_a_running_send_is_visible_to_off_and_gone_when_it_ends(self):
+        runtime = Path(self.tmp.name) / "runtime"
+        runtime.mkdir()
+        self.env.update(XDG_RUNTIME_DIR=str(runtime), SENDER_SLEEP="1")
+        sends = runtime / "omdrop" / "sends"
+        proc = subprocess.Popen([OMDROP, "send", "--to", "e2:9d", str(self.file)], env=self.env,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        deadline = time.monotonic() + 5
+        while not self.capture.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+
+        markers = list(sends.iterdir()) if sends.exists() else []
+        self.assertEqual([m.read_text().strip() for m in markers], ["e2:9d"])
+
+        proc.communicate(timeout=10)
+        self.assertEqual(list(sends.iterdir()), [])
 
     def test_verbose_keeps_the_log_a_bug_report_needs(self):
         result = self.run_omdrop("send", "--verbose", str(self.file))

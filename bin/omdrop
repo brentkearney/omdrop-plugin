@@ -54,7 +54,7 @@ PROJ="$(cd "$(dirname "$SELF")/.." && pwd)"
 # A fallback that silently substitutes for the real value is the same class of
 # defect as a status line reporting a state that was never entered, so this one
 # says when it is guessing, and says when the two disagree.
-VERSION_FALLBACK=0.13.0
+VERSION_FALLBACK=0.14.0
 omdrop_version() {
   local dir manifest version= real
   real=$(readlink -f "$0" 2>/dev/null) || real="$0"
@@ -162,7 +162,9 @@ omdrop -- send and receive files with nearby Apple devices
                     -c/--contacts  only known senders may send
                     Either flag also sets the saved visibility, so it stays
                     that way until you change it back.
-  off               stop receiving and advertising, cancel any pending window
+  off [--force]     stop receiving and advertising, cancel any pending window.
+                    Refuses while a send is running, since that would cut it
+                    off; --force stops anyway
   toggle            off if receiving, on if not
   status [--json]   receiving or not, time left, the name Macs see
   send FILE...      send files to a nearby Apple device, as one transfer
@@ -525,7 +527,7 @@ cmd_identity() {
       # Turn off first: a running receiver holds the key in its memory, and
       # revoking the cache cannot reach that copy.
       if receiving || [[ -e "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/omdrop/window" ]]; then
-        cmd_off >/dev/null
+        cmd_off --force >/dev/null
       fi
       "$ID_PY" lock ;;
     1password)
@@ -808,12 +810,12 @@ DRIVER_PKG=brcmfmac-awdl-dkms
 # checkout below is detached at this SHA and the build only runs if it
 # succeeded. Bump it, in the same commit, whenever the plugin needs a newer
 # driver: the full 40 characters, because a short SHA is not a pin.
-DRIVER_COMMIT=80c9a0ead1b4b468227bc461b23448ed1a039727
+DRIVER_COMMIT=f191e753b492d8b3034e34d0bf574e685cf683c3
 # The package version that commit builds, with its pkgrel. install-driver
 # rebuilds any older installed driver: a fix inside the helper, such as 0.5.1's,
 # changes nothing a feature probe could see, and a packaging fix such as
 # 0.6.3-2's (the kernel headers became a dependency) changes only the pkgrel.
-DRIVER_VERSION=0.7.0
+DRIVER_VERSION=0.8.0
 # The first driver whose sender, send-to-peer and advertiser follow
 # docs/identity-contract.md. Moving the identity into 1Password needs it.
 DRIVER_IDENTITY_VERSION=0.7.0
@@ -875,7 +877,7 @@ else
   git clone --quiet $DRIVER_REPO '$src'
 fi
 echo 'Building driver commit $DRIVER_COMMIT'
-git -C '$src' checkout --detach 80c9a0ead1b4b468227bc461b23448ed1a039727 && makepkg --dir '$src' -si"
+git -C '$src' checkout --detach f191e753b492d8b3034e34d0bf574e685cf683c3 && makepkg --dir '$src' -si"
     fi
   fi
 
@@ -1001,7 +1003,7 @@ cmd_on() {
   # it does not start: a bound that is only advice is not a bound.
   if [[ "$id_source" == 1password && -n "$id_expiry" ]]; then
     if ! systemd-run --user --quiet --on-active="$(( id_expiry > 0 ? id_expiry : 1 ))s" \
-         --unit="$ID_EXPIRY" "$SELF" off; then
+         --unit="$ID_EXPIRY" "$SELF" off --force; then
       identity_abort
       die "The AirDrop receiver would not start: the identity cache's expiry could not be armed."
     fi
@@ -1126,7 +1128,7 @@ cmd_on() {
   # again so both ends agree on when this closes.
   case "$mode" in
     timed)
-      systemd-run --user --quiet --on-active="$dur" --unit="$WINDOW" "$SELF" off \
+      systemd-run --user --quiet --on-active="$dur" --unit="$WINDOW" "$SELF" off --force \
         || die "receiving, but the $dur window could not be armed -- turn it off yourself"
       [[ -x "$DISCOVERABLE" ]] && pkexec "$DISCOVERABLE" start "$secs" >/dev/null 2>&1 8>&- ;;
   esac
@@ -1136,8 +1138,43 @@ cmd_on() {
   cmd_status
 }
 
+# Sends in progress, one marker per `omdrop send` process, naming where it
+# is going. Turning Omdrop off takes the radio down, and a transfer cut off
+# that way never closes on the other end: a Mac kept a 0-byte file "in use"
+# and stopped accepting connections from this machine (2026-10-09).
+SENDS_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/omdrop/sends"
+mark_sending() { (umask 077 && mkdir -p -- "$SENDS_DIR" && printf '%s\n' "$1" > "$SENDS_DIR/$$"); }
+unmark_sending() { rm -f -- "$SENDS_DIR/$$"; }
+
+# Where the live sends are going, one per line. A marker whose process has
+# gone (killed, crashed) is cleared rather than believed.
+sending_to() {
+  local f pid
+  for f in "$SENDS_DIR"/*; do
+    [[ -e "$f" ]] || continue
+    pid=${f##*/}
+    if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+      cat -- "$f"
+    else
+      rm -f -- "$f"
+    fi
+  done
+}
+
 cmd_off() {
+  local force=0 to
+  case "${1:-}" in
+    --force) force=1 ;;
+    "") ;;
+    *) die "off: no such option $1" ;;
+  esac
   require_unit
+  # A person asking for off while a send is running gets told, not obeyed.
+  # The timers that close a window pass --force: nobody is there to ask.
+  if (( ! force )); then
+    to=$(sending_to | head -1)
+    [[ -z "$to" ]] || die "Still sending to $to. Turning Omdrop off now would cut the transfer off. Cancel the send first, or turn it off anyway with: omdrop off --force"
+  fi
   # Under the identity lock, in this order: nothing that starts later can
   # publish into this window; the receiver stops before the identity it loaded
   # is released; the window file goes last. See docs/identity-contract.md.
@@ -1502,6 +1539,10 @@ cmd_send() {
   # sender's own default ("Omarchy") is nobody's machine in particular.
   local cmd=("$SENDER" --name "$(effective_name)" --wait "$wait" --mac "$PEER" -- "${files[@]}")
 
+  # Until this process exits, `omdrop off` knows a transfer is running.
+  mark_sending "${to:-$PEER}" || true
+  trap unmark_sending EXIT
+
   if (( verbose )); then
     # Verbose is for bug reports: the protocol log, and redacted dumps of each
     # request and answer in the runtime directory (docs/identity-contract.md).
@@ -1513,9 +1554,46 @@ cmd_send() {
 
 # PIPESTATUS, not $?: the narrator always succeeds, and the answer to "did
 # the file arrive" is the sender's exit status. Reads `cmd` from cmd_send.
+# The sender's complaints go through send_errors on their way to stderr; the
+# wait is for that filter, so its last line is out before the panel reads it.
 send_narrated() {
-  "${cmd[@]}" | narrate_send
-  return "${PIPESTATUS[0]}"
+  local rc
+  "${cmd[@]}" 2> >(send_errors >&2) | narrate_send
+  rc=${PIPESTATUS[0]}
+  wait "$!" 2>/dev/null
+  return "$rc"
+}
+
+# The sender's "<address> never opened 8770; on an iPhone, open a share
+# sheet..." names a port and a macOS daemon. What the person can act on
+# depends on the identity this computer is sending with: a self-signed one
+# only reaches devices set to Everyone.
+send_errors() {
+  local line
+  while IFS= read -r line; do
+    case "$line" in
+      *" never opened "*) unreachable_message ;;
+      *) printf '%s\n' "$line" ;;
+    esac
+  done
+}
+
+unreachable_message() {
+  local window mode
+  read -r window mode < <("$ID_PY" status --json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except ValueError:
+    d = {}
+print(d.get("window") or "-", d.get("mode") or "-")' 2>/dev/null)
+  if [[ "$window" == self-signed && "$mode" == 1password ]]; then
+    printf '%s\n' '1Password locked; using self-signed certificates. Peers must be in "Everyone" mode.'
+  elif [[ "$window" == self-signed ]]; then
+    printf '%s\n' 'Using self-signed certificates. Peers must be in "Everyone" mode.'
+  else
+    printf '%s\n' 'It is not accepting files right now. On an iPhone, open a share sheet to wake AirDrop, then try again.'
+  fi
 }
 
 stop_group() {
@@ -1785,8 +1863,8 @@ cmd_watch() {
       # 2026-09-17: a one-file window announced its file, closed the watcher,
       # and left the receiver listening, which then accepted a second file.
       # --collect so the unit does not linger once it has exited.
-      systemd-run --user --quiet --collect "$SELF" off >/dev/null 2>&1 \
-        || "$SELF" off >/dev/null 2>&1
+      systemd-run --user --quiet --collect "$SELF" off --force >/dev/null 2>&1 \
+        || "$SELF" off --force >/dev/null 2>&1
       return 0
     fi
   done
@@ -2266,10 +2344,10 @@ cmd_name() {
     return
   fi
   local new=$1 old
-  [[ -n "${new//[[:space:]]/}" ]] || die "name: cannot be empty"
-  (( ${#new} <= 63 )) || die "name: 63 characters at most (this one is ${#new})"
-  [[ "$new" != *[/\\]* ]] || die "name: no path separators"
-  [[ "$new" != *[[:cntrl:]]* ]] || die "name: no control characters"
+  [[ -n "${new//[[:space:]]/}" ]] || die "The name can't be empty."
+  (( ${#new} <= 63 )) || die "The name can be 63 characters at most; this one has ${#new}."
+  [[ "$new" != *[/\\]* ]] || die "The name can't contain / or \\."
+  [[ "$new" != *[[:cntrl:]]* ]] || die "The name can't contain control characters."
   old=$(cfg_get name)
   cfg_set name "$new" || die "could not write $CONFIG"
   if receiving; then
@@ -2292,7 +2370,7 @@ systemctl --user status $UNIT"
 # a person re-reading the help to learn a synonym we could simply have taken.
 case "${1:-status}" in
   on|start)   shift; cmd_on "$@" ;;
-  off|stop)   shift; cmd_off ;;
+  off|stop)   shift; cmd_off "$@" ;;
   toggle) shift; cmd_toggle "$@" ;;
   status) shift; cmd_status "$@" ;;
   send)   shift; cmd_send "$@" ;;
