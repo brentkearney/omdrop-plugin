@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "netmojo.omdrop",
   "name": "Omdrop - AirDrop for Omarchy-Mac",
-  "version": "0.14.0",
+  "version": "0.14.1",
   "author": "Brent Kearney",
   "license": "MIT",
   "description": "Send and receive files with nearby Apple devices over AirDrop, on Apple Silicon Macs running Omarchy. Marketplace review lags releases; to install the latest version straight from GitHub, run: omarchy plugin add https://github.com/brentkearney/omdrop-plugin.git",
