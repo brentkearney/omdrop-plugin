@@ -1513,9 +1513,46 @@ cmd_send() {
 
 # PIPESTATUS, not $?: the narrator always succeeds, and the answer to "did
 # the file arrive" is the sender's exit status. Reads `cmd` from cmd_send.
+# The sender's complaints go through send_errors on their way to stderr; the
+# wait is for that filter, so its last line is out before the panel reads it.
 send_narrated() {
-  "${cmd[@]}" | narrate_send
-  return "${PIPESTATUS[0]}"
+  local rc
+  "${cmd[@]}" 2> >(send_errors >&2) | narrate_send
+  rc=${PIPESTATUS[0]}
+  wait "$!" 2>/dev/null
+  return "$rc"
+}
+
+# The sender's "<address> never opened 8770; on an iPhone, open a share
+# sheet..." names a port and a macOS daemon. What the person can act on
+# depends on the identity this computer is sending with: a self-signed one
+# only reaches devices set to Everyone.
+send_errors() {
+  local line
+  while IFS= read -r line; do
+    case "$line" in
+      *" never opened "*) unreachable_message ;;
+      *) printf '%s\n' "$line" ;;
+    esac
+  done
+}
+
+unreachable_message() {
+  local window mode
+  read -r window mode < <("$ID_PY" status --json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except ValueError:
+    d = {}
+print(d.get("window") or "-", d.get("mode") or "-")' 2>/dev/null)
+  if [[ "$window" == self-signed && "$mode" == 1password ]]; then
+    printf '%s\n' '1Password locked; using self-signed certificates. Peers must be in "Everyone" mode.'
+  elif [[ "$window" == self-signed ]]; then
+    printf '%s\n' 'Using self-signed certificates. Peers must be in "Everyone" mode.'
+  else
+    printf '%s\n' 'It is not accepting files right now. On an iPhone, open a share sheet to wake AirDrop, then try again.'
+  fi
 }
 
 stop_group() {
