@@ -333,6 +333,23 @@ class SendCommandTests(SenderFixture):
         self.assertFalse(Path(f"{self.capture}.outlived").exists(),
                          "the sender kept going after the send was cancelled")
 
+    def test_a_running_send_is_visible_to_off_and_gone_when_it_ends(self):
+        runtime = Path(self.tmp.name) / "runtime"
+        runtime.mkdir()
+        self.env.update(XDG_RUNTIME_DIR=str(runtime), SENDER_SLEEP="1")
+        sends = runtime / "omdrop" / "sends"
+        proc = subprocess.Popen([OMDROP, "send", "--to", "e2:9d", str(self.file)], env=self.env,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        deadline = time.monotonic() + 5
+        while not self.capture.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+
+        markers = list(sends.iterdir()) if sends.exists() else []
+        self.assertEqual([m.read_text().strip() for m in markers], ["e2:9d"])
+
+        proc.communicate(timeout=10)
+        self.assertEqual(list(sends.iterdir()), [])
+
     def test_verbose_keeps_the_log_a_bug_report_needs(self):
         result = self.run_omdrop("send", "--verbose", str(self.file))
 

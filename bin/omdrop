@@ -162,7 +162,9 @@ omdrop -- send and receive files with nearby Apple devices
                     -c/--contacts  only known senders may send
                     Either flag also sets the saved visibility, so it stays
                     that way until you change it back.
-  off               stop receiving and advertising, cancel any pending window
+  off [--force]     stop receiving and advertising, cancel any pending window.
+                    Refuses while a send is running, since that would cut it
+                    off; --force stops anyway
   toggle            off if receiving, on if not
   status [--json]   receiving or not, time left, the name Macs see
   send FILE...      send files to a nearby Apple device, as one transfer
@@ -525,7 +527,7 @@ cmd_identity() {
       # Turn off first: a running receiver holds the key in its memory, and
       # revoking the cache cannot reach that copy.
       if receiving || [[ -e "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/omdrop/window" ]]; then
-        cmd_off >/dev/null
+        cmd_off --force >/dev/null
       fi
       "$ID_PY" lock ;;
     1password)
@@ -1001,7 +1003,7 @@ cmd_on() {
   # it does not start: a bound that is only advice is not a bound.
   if [[ "$id_source" == 1password && -n "$id_expiry" ]]; then
     if ! systemd-run --user --quiet --on-active="$(( id_expiry > 0 ? id_expiry : 1 ))s" \
-         --unit="$ID_EXPIRY" "$SELF" off; then
+         --unit="$ID_EXPIRY" "$SELF" off --force; then
       identity_abort
       die "The AirDrop receiver would not start: the identity cache's expiry could not be armed."
     fi
@@ -1126,7 +1128,7 @@ cmd_on() {
   # again so both ends agree on when this closes.
   case "$mode" in
     timed)
-      systemd-run --user --quiet --on-active="$dur" --unit="$WINDOW" "$SELF" off \
+      systemd-run --user --quiet --on-active="$dur" --unit="$WINDOW" "$SELF" off --force \
         || die "receiving, but the $dur window could not be armed -- turn it off yourself"
       [[ -x "$DISCOVERABLE" ]] && pkexec "$DISCOVERABLE" start "$secs" >/dev/null 2>&1 8>&- ;;
   esac
@@ -1136,8 +1138,43 @@ cmd_on() {
   cmd_status
 }
 
+# Sends in progress, one marker per `omdrop send` process, naming where it
+# is going. Turning Omdrop off takes the radio down, and a transfer cut off
+# that way never closes on the other end: a Mac kept a 0-byte file "in use"
+# and stopped accepting connections from this machine (2026-10-09).
+SENDS_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/omdrop/sends"
+mark_sending() { (umask 077 && mkdir -p -- "$SENDS_DIR" && printf '%s\n' "$1" > "$SENDS_DIR/$$"); }
+unmark_sending() { rm -f -- "$SENDS_DIR/$$"; }
+
+# Where the live sends are going, one per line. A marker whose process has
+# gone (killed, crashed) is cleared rather than believed.
+sending_to() {
+  local f pid
+  for f in "$SENDS_DIR"/*; do
+    [[ -e "$f" ]] || continue
+    pid=${f##*/}
+    if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+      cat -- "$f"
+    else
+      rm -f -- "$f"
+    fi
+  done
+}
+
 cmd_off() {
+  local force=0 to
+  case "${1:-}" in
+    --force) force=1 ;;
+    "") ;;
+    *) die "off: no such option $1" ;;
+  esac
   require_unit
+  # A person asking for off while a send is running gets told, not obeyed.
+  # The timers that close a window pass --force: nobody is there to ask.
+  if (( ! force )); then
+    to=$(sending_to | head -1)
+    [[ -z "$to" ]] || die "Still sending to $to. Turning Omdrop off now would cut the transfer off. Cancel the send first, or turn it off anyway with: omdrop off --force"
+  fi
   # Under the identity lock, in this order: nothing that starts later can
   # publish into this window; the receiver stops before the identity it loaded
   # is released; the window file goes last. See docs/identity-contract.md.
@@ -1502,6 +1539,10 @@ cmd_send() {
   # sender's own default ("Omarchy") is nobody's machine in particular.
   local cmd=("$SENDER" --name "$(effective_name)" --wait "$wait" --mac "$PEER" -- "${files[@]}")
 
+  # Until this process exits, `omdrop off` knows a transfer is running.
+  mark_sending "${to:-$PEER}" || true
+  trap unmark_sending EXIT
+
   if (( verbose )); then
     # Verbose is for bug reports: the protocol log, and redacted dumps of each
     # request and answer in the runtime directory (docs/identity-contract.md).
@@ -1822,8 +1863,8 @@ cmd_watch() {
       # 2026-09-17: a one-file window announced its file, closed the watcher,
       # and left the receiver listening, which then accepted a second file.
       # --collect so the unit does not linger once it has exited.
-      systemd-run --user --quiet --collect "$SELF" off >/dev/null 2>&1 \
-        || "$SELF" off >/dev/null 2>&1
+      systemd-run --user --quiet --collect "$SELF" off --force >/dev/null 2>&1 \
+        || "$SELF" off --force >/dev/null 2>&1
       return 0
     fi
   done
@@ -2329,7 +2370,7 @@ systemctl --user status $UNIT"
 # a person re-reading the help to learn a synonym we could simply have taken.
 case "${1:-status}" in
   on|start)   shift; cmd_on "$@" ;;
-  off|stop)   shift; cmd_off ;;
+  off|stop)   shift; cmd_off "$@" ;;
   toggle) shift; cmd_toggle "$@" ;;
   status) shift; cmd_status "$@" ;;
   send)   shift; cmd_send "$@" ;;

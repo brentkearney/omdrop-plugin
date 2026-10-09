@@ -69,7 +69,7 @@ The panel's controls are also commands:
 omdrop on 15                      # visible to everyone for 15 minutes
 omdrop on -c 10m                  # Contacts Only, for 10 minutes
 omdrop on once                    # until one file arrives
-omdrop off
+omdrop off                        # refuses while a send is running; --force stops anyway
 omdrop status
 omdrop name "Study Mac"
 omdrop dir ~/Drops
