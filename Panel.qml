@@ -938,6 +938,10 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
+      // The catcher sees keys before its descendants, so while a text field
+      // is being typed into it must stand aside: otherwise Enter and Space
+      // toggle Omdrop, d and n act, and h/j/k/l/x never reach the field.
+      blocked: nameField.activeFocus || senderField.activeFocus
       onCloseRequested: root.controller.hide()
       onActivateRequested: root.toggleOmdrop()
       onTextKey: function(t) {
@@ -1239,6 +1243,7 @@ Panel {
             placeholderText: "Apple ID email or phone number"
             onTextEdited: root.senderError = ""
             onAccepted: root.addSender(text)
+            Keys.onEscapePressed: keyCatcher.forceActiveFocus()
           }
 
           Text {
@@ -1421,6 +1426,8 @@ Panel {
             // when this field is not the one being edited.
             onActiveFocusChanged: if (!activeFocus) text = root.deviceName
             onAccepted: root.setDeviceName(text)
+            // Escape abandons the edit and hands the keys back to the panel.
+            Keys.onEscapePressed: keyCatcher.forceActiveFocus()
           }
         }
 
