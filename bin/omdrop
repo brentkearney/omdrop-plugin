@@ -2344,10 +2344,10 @@ cmd_name() {
     return
   fi
   local new=$1 old
-  [[ -n "${new//[[:space:]]/}" ]] || die "name: cannot be empty"
-  (( ${#new} <= 63 )) || die "name: 63 characters at most (this one is ${#new})"
-  [[ "$new" != *[/\\]* ]] || die "name: no path separators"
-  [[ "$new" != *[[:cntrl:]]* ]] || die "name: no control characters"
+  [[ -n "${new//[[:space:]]/}" ]] || die "The name can't be empty."
+  (( ${#new} <= 63 )) || die "The name can be 63 characters at most; this one has ${#new}."
+  [[ "$new" != *[/\\]* ]] || die "The name can't contain / or \\."
+  [[ "$new" != *[[:cntrl:]]* ]] || die "The name can't contain control characters."
   old=$(cfg_get name)
   cfg_set name "$new" || die "could not write $CONFIG"
   if receiving; then

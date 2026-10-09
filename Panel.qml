@@ -371,16 +371,49 @@ Panel {
     }
   }
 
-  // The name is validated by the receiver, not here: it refuses to start on a
-  // bad value, and the CLI puts the old one back if that happens. A failure
-  // therefore shows up as the field snapping back on the next poll.
-  Process { id: setNameProc; onExited: root.refreshStatus() }
+  // The name is validated by the CLI and the receiver, not here: the CLI
+  // refuses a bad value and puts the old one back if the receiver will not
+  // start with the new one. Either way its message is shown, and the field
+  // returns to the name in effect on the next poll.
+  //
+  // An edit is kept when the field loses focus, not only on Enter: closing
+  // the panel or clicking elsewhere after typing a name is the ordinary way to
+  // finish, and discarding the name then looked like a rename that failed.
+  // pendingName is the name on its way to the CLI; one asked for while an
+  // earlier one is still being applied goes next.
+  property string pendingName: ""
+  property string sentName: ""
+  Process {
+    id: setNameProc
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: if (text.trim() !== "") root.lastError = text.trim()
+    }
+    onExited: function(code) {
+      if (code === 0) root.lastError = ""
+      if (root.pendingName !== root.sentName) {
+        root.startSetName()
+        return
+      }
+      root.pendingName = ""
+      root.refreshStatus()
+    }
+  }
 
-  function setDeviceName(v) {
-    if (v === "" || v === root.deviceName) return
-    setNameProc.command = [root.cli, "name", v]
+  function startSetName() {
+    sentName = pendingName
+    setNameProc.command = [root.cli, "name", sentName]
     setNameProc.running = true
   }
+
+  function setDeviceName(v) {
+    if (v.trim() === "" || v === shownName) return
+    pendingName = v
+    if (!setNameProc.running) startSetName()
+  }
+
+  // What the field shows when nobody is typing in it.
+  readonly property string shownName: pendingName !== "" ? pendingName : deviceName
 
   // The download folder is chosen in Nautilus, not typed: a path typed into a
   // field is a path somebody has to get exactly right, and the chooser can
@@ -842,7 +875,7 @@ Panel {
       if (!soundProc.running) soundOn = s.sound !== false
       if (!audienceProc.running) audience = s.visibility === "contacts" ? "contacts" : "everyone"
       senders = s.senders || 0
-      if (!nameField.activeFocus) nameField.text = deviceName
+      if (!nameField.activeFocus) nameField.text = shownName
       // Asked once per transition into unusable, not on every poll.
       if (!usable && doctorText === "" && !doctorProc.running) doctorProc.running = true
       if (usable) { doctorText = ""; driverInstallable = false }
@@ -1421,13 +1454,20 @@ Panel {
             id: nameField
             width: parent.width
             foreground: root.foreground
-            text: root.deviceName
-            // Don't fight the user's typing: only take the polled value back
-            // when this field is not the one being edited.
-            onActiveFocusChanged: if (!activeFocus) text = root.deviceName
+            text: root.shownName
+            // Don't fight the user's typing: the polled name is only taken
+            // back while this field is not being edited. Leaving the field
+            // keeps what was typed, the same as Enter.
+            onActiveFocusChanged: if (!activeFocus) {
+              root.setDeviceName(text)
+              text = root.shownName
+            }
             onAccepted: root.setDeviceName(text)
             // Escape abandons the edit and hands the keys back to the panel.
-            Keys.onEscapePressed: keyCatcher.forceActiveFocus()
+            Keys.onEscapePressed: {
+              text = root.shownName
+              keyCatcher.forceActiveFocus()
+            }
           }
         }
 
