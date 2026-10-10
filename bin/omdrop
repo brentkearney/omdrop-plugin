@@ -171,13 +171,15 @@ omdrop -- send and receive files with nearby Apple devices
                     send files to a nearby Apple device, as one transfer
                     it accepts once, or send http/https links. A .webloc or
                     .url file holding a web link goes as that link.
-                    Send links and files separately. Turn a window on first
-                    (omdrop on): that is what hears the devices around you.
-                    NAME chooses a device by name; --to ADDRESS chooses
-                    by part of its address. --wait SECONDS keeps trying
-                    while an iPhone's receiver is asleep (default 30),
-                    announcing this machine over Bluetooth to wake it.
-                    --pick asks for the files in a chooser instead.
+                    Send links and files separately. With Omdrop off, a
+                    send to NAME turns it on for the usual window first.
+                    NAME searches for up to two minutes, reporting devices
+                    as they answer; OMDROP_NAME_WAIT sets this in seconds.
+                    An exact name wins over a partial match; duplicate names
+                    need --to ADDRESS. Cleanup can take two more seconds.
+                    --wait SECONDS waits for an iPhone's receiver to wake
+                    (default 30), separately from finding its name, announcing
+                    this machine over Bluetooth. --pick opens a file chooser.
   peers [-n]        the Apple devices nearby right now. -n also asks
                     each one for its name, which means connecting to it and
                     showing this machine to every device listed, and briefly
@@ -213,6 +215,8 @@ omdrop -- send and receive files with nearby Apple devices
   links ACTION      install or remove the double-click handler for received
                     .url and .webloc links
   open-link FILE    open a .url or .webloc link in the browser (web links only)
+  skill ACTION      install or remove the skill that tells AI agents how to
+                    use omdrop (setup installs it)
   version           the plugin version, for bug reports
 
 Aliases, if you reach for a different word:
@@ -644,6 +648,8 @@ setup_install() {
   # Received links are stored as .url files, and a Mac may send a .webloc.
   # Without this, double-clicking one opens it in a text editor.
   links_install "$plugin" && did=1
+  # So an AI agent asked to AirDrop something knows this command exists.
+  skills_install "$plugin" && did=1
 
   if [[ -z "$(cfg_get name)" ]]; then
     cfg_set name "$(default_name)" \
@@ -1090,6 +1096,7 @@ cmd_on() {
     local plugin
     plugin=$(plugin_dir) || { echo "omdrop cannot tell where it is installed." >&2; return 1; }
     unit_install "$plugin" || true
+    skills_install "$plugin" >/dev/null 2>&1 || true
     prepare_identity >&2 || return 1
     ensure_tls; (( $? == 2 )) && return 1
     # The unit may write opt-in protocol dumps only here (ReadWritePaths= with
@@ -1318,6 +1325,20 @@ require_sender() {
     || die "The Apple-compatible radio is not running, so nobody can be heard and nothing can be sent. Start it with: omdrop on 10m"
 }
 
+# Whether a window is open: awdl0 has its link-local address and the radio
+# helper reports itself visible. The address alone outlives `omdrop off`. The
+# helper's answer is read as JSON, so any valid spelling of it counts.
+radio_on() {
+  awdl_link_local || return 1
+  [[ -x "$DISCOVERABLE" ]] || return 0
+  "$DISCOVERABLE" status --json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    sys.exit(0 if json.load(sys.stdin).get("visible") is True else 1)
+except (ValueError, AttributeError):
+    sys.exit(1)'
+}
+
 # A driver older than 0.5.0 sends one file only. Its usage line is what says
 # so, and asking it is cheaper than keeping a table of driver versions.
 sender_takes_several_files() {
@@ -1378,8 +1399,98 @@ narrate_send() {
 # when the answer was polkit (send-to-peer's own lesson, 2026-09-18). Only its
 # exit 1, "the table is empty", means an empty room.
 PEER=
+
+# Decimal seconds for named discovery. Strip leading zeros before arithmetic,
+# and bound the input before conversion so oversized values cannot wrap.
+NAME_WAIT=${OMDROP_NAME_WAIT:-120}
+NAME_WAIT=${NAME_WAIT#"${NAME_WAIT%%[!0]*}"}
+if [[ "$NAME_WAIT" =~ ^[0-9]{1,10}$ ]] && (( 10#$NAME_WAIT <= 2147483647 )); then
+  NAME_WAIT=$(( 10#$NAME_WAIT ))
+else
+  NAME_WAIT=120
+fi
+
+# Keep answers across passes, but finish each pass before choosing: another
+# device may have the same name. `listing` and `rc` belong to choose_peer.
+find_by_name() {
+  local want=$1 shown=$2 line mac name pid= found=0 other= note_at=0 left timed_out fd
+  local deadline=$(( SECONDS + NAME_WAIT ))
+  local -A row_of=() said=()
+  trap '[[ -z "$pid" ]] || stop_group "$pid"; echo "Cancelled." >&2; exit 130' TERM INT HUP
+  printf 'Looking for "%s" nearby (up to %ds)...\n' "$shown" "$NAME_WAIT"
+  while :; do
+    left=$(( deadline - SECONDS ))
+    (( left > 0 )) || break
+    other= timed_out=0
+    # timeout bounds both the capability probe and the lookup, including a
+    # child that closes its output but stays alive. Its session also contains
+    # probes and Bluetooth advertising, so cancellation stops them together.
+    # The two-second grace matches stop_group; neither wait can run forever.
+    exec {fd}< <(exec setsid timeout --kill-after=2 "$left" bash -c '
+      sender=$1
+      flags=()
+      "$sender" --help 2>&1 | grep -- "--stream" >/dev/null && flags=(--stream)
+      exec "$sender" --list --names "${flags[@]}"
+    ' bash "$SENDER" 2>&1)
+    pid=$!
+    while :; do
+      left=$(( deadline - SECONDS ))
+      (( left > 0 )) || { timed_out=1; break; }
+      IFS= read -r -t "$left" line <&"$fd" || { rc=$?; (( rc > 128 )) && timed_out=1; break; }
+      if [[ "$line" =~ ^(([0-9a-f]{2}:){5}[0-9a-f]{2})[[:space:]]+(-?[0-9]+|\?)\ dBm[[:space:]]+[^[:space:]]+[[:space:]]*(.*)$ ]]; then
+        mac=${BASH_REMATCH[1]}; name=${BASH_REMATCH[4]}
+        # Keep an earlier answer if a later pass gets no response.
+        [[ -n "${row_of[$mac]+x}" && "$name" == "(no response)" ]] || row_of[$mac]=$line
+        case "$name" in
+          ''|'(no response)'|'(anonymous)') ;;
+          *)
+            [[ -n "${said[$mac]+x}" ]] || { said[$mac]=1; printf 'Heard from %s.\n' "$name"; }
+            [[ "${name,,}" == *"$want"* ]] && found=1 ;;
+        esac
+      else
+        other+=$line$'\n'
+      fi
+    done
+    if (( timed_out )); then
+      stop_group "$pid"
+      rc=1
+    else
+      wait "$pid"; rc=$?
+      # GNU timeout returns 124, or 137 when its grace ends in SIGKILL.
+      if (( SECONDS >= deadline && (rc == 124 || rc == 137) )); then timed_out=1; fi
+    fi
+    exec {fd}<&-
+    pid=
+    # A truncated pass cannot establish uniqueness, even if a match arrived.
+    if (( timed_out )); then
+      die "Name lookup did not finish within $NAME_WAIT seconds; nothing was sent. Open AirDrop on \"$shown\" and try again.
+${other}Answers so far:
+$(printf '  %s\n' "${row_of[@]}")"
+    fi
+    # Only exit 1 means an empty table; other failures need attention now.
+    (( rc == 0 || rc == 1 )) || die "${other%$'\n'}"
+    (( found )) && break
+    left=$(( deadline - SECONDS ))
+    (( left > 0 )) || break
+    if (( SECONDS >= note_at )); then
+      printf 'No "%s" yet (devices heard: %d, named: %d). Still looking, %ds left...\n' \
+        "$shown" "${#row_of[@]}" "${#said[@]}" "$left"
+      note_at=$(( SECONDS + 15 ))
+    fi
+    # A fast empty pass must not spin, or sleep past the remaining budget.
+    (( left > 3 )) && left=3
+    setsid sleep "$left" &
+    pid=$!
+    wait "$pid"
+    pid=
+  done
+  trap - TERM INT HUP
+  listing=$(printf '%s\n' "${row_of[@]}")
+  (( ${#row_of[@]} )) && rc=0 || rc=1
+}
+
 choose_peer() {
-  local want=${1,,} listing rc rows=() matches=() row lines= quoted by_name=0; shift
+  local want=${1,,} shown=$1 listing rc rows=() matches=() exact=() row lines= quoted by_name=0; shift
   # A colon, or a full 12-hex MAC, is an address. Anything else is a device
   # name -- and the test has to be that strict, because device names are often
   # pure hex ("f0011" is one here) and treating such a name as an address
@@ -1390,15 +1501,17 @@ choose_peer() {
   # receiving -- which is exactly the case here, since it has to be receiving
   # to accept the file anyway.
   if (( by_name )); then
-    listing=$("$SENDER" --list --names 2>&1); rc=$?
+    find_by_name "$want" "$shown"
   else
     listing=$("$SENDER" --list 2>&1); rc=$?
   fi
   (( rc == 0 || rc == 1 )) || die "$listing"
   mapfile -t rows < <(printf '%s\n' "$listing" \
     | sed -nE 's/^(([0-9a-f]{2}:){5}[0-9a-f]{2})[[:space:]]+(-?[0-9]+|\?) dBm[[:space:]]+[^[:space:]]+[[:space:]]*(.*)$/\1|\3|\4/p')
-  (( ${#rows[@]} )) \
-    || die "No nearby Apple device found. A window is what finds them, so open one first:  omdrop on 10m"
+  if (( ${#rows[@]} == 0 )); then
+    (( by_name )) && die "No Apple device was heard in $NAME_WAIT seconds. Open AirDrop on \"$shown\" so it can be heard, then try again."
+    die "No nearby Apple device found. A window is what finds them, so open one first:  omdrop on 10m"
+  fi
 
   for row in "${rows[@]}"; do
     local mac=${row%%|*} rest=${row#*|} name
@@ -1406,13 +1519,16 @@ choose_peer() {
     if [[ -z "$want" ]]; then matches+=("$row")
     elif (( by_name )); then
       [[ "$name" == *"$want"* && "$name" != "(no response)" && "$name" != "(anonymous)" ]] && matches+=("$row")
+      [[ "$name" == "$want" ]] && exact+=("$row")
     else
       [[ "$mac" == *"$want"* ]] && matches+=("$row")
     fi
   done
+  # Prefer an exact name, but still refuse two devices with that exact name.
+  (( ${#exact[@]} )) && matches=("${exact[@]}")
   if (( ${#matches[@]} == 0 )); then
     if (( by_name )); then
-      die "No device called \"$want\" is receiving right now. A device gives its name
+      die "No device called \"$shown\" answered in $NAME_WAIT seconds. A device gives its name
 only while it is ready to receive, so open AirDrop on it and try again. What answered:
 $(printf '%s\n' "$listing" | sed 's/^/  /')"
     fi
@@ -1547,7 +1663,8 @@ cmd_send() {
   if [[ -n "$to" ]]; then
     [[ "$to" != *$'\n'* ]] || die "send: a recipient is one name or address, not several lines"
   fi
-  require_sender
+  [[ -x "$SENDER" ]] \
+    || die "The program that sends files is not installed. It comes with the Wi-Fi driver: omdrop install-driver"
   # The driver package owns the sender, and a driver older than this plugin
   # takes one file only. Say so, rather than surface its argparse error.
   if (( ${#files[@]} > 1 )) && ! sender_takes_several_files; then
@@ -1555,6 +1672,21 @@ cmd_send() {
   fi
   if (( ${#urls[@]} )) && ! "$SENDER" --help 2>&1 | grep -q -- '--url'; then
     die "Sending a link needs a newer Wi-Fi driver package. Update it with: omdrop install-driver"
+  fi
+
+  # A closed window hears nobody, so a send to a named device opens one, as
+  # the panel's Send section does, for the usual window. A send without a
+  # name needs the window open first: in a window just opened, "the only
+  # device heard" is whichever device spoke first.
+  if ! radio_on; then
+    local example; printf -v example ' %q' "${urls[@]}" "${files[@]}"
+    [[ -n "$to" ]] || die "Omdrop is off, so no device can be heard. Name the device, and omdrop turns itself on to find it:
+  omdrop send NAME$example
+Or turn it on first, with: omdrop on"
+    printf 'Omdrop is off. Turning it on for %s, so nearby devices can be heard...\n' "$DEFAULT_WINDOW"
+    "$SELF" on >/dev/null || die "Omdrop could not be turned on, so nothing was sent."
+    radio_on || die "Omdrop turned on, but the radio is not up yet, so nothing was sent. Try again in a few seconds."
+    printf 'Omdrop is on, and visible nearby until the window ends. Turn it off sooner with: omdrop off\n'
   fi
 
   choose_peer "$to" "${urls[@]}" "${files[@]}"
@@ -2115,6 +2247,78 @@ cmd_links() {
   esac
 }
 
+# The skill that tells an AI agent how to use omdrop, linked into the skill
+# directories Omarchy provisions for the agents it launches. Only directories
+# that already exist: a missing one belongs to an agent that is not installed.
+SKILL_DIRS=("$HOME/.agents/skills" "$HOME/.claude/skills" "$HOME/.codex/skills" "$HOME/.pi/agent/skills")
+
+# An entry named omdrop is replaced only when it is absent, a dangling link,
+# or a link into some plugin's skills/omdrop -- the same rule as the command
+# on PATH. Judged by the link's own target, not its resolution: a plugin
+# directory can itself be a link into a source checkout. Anything else, a
+# directory or a live link elsewhere, is left in place with a message.
+# Returns 0 when it linked anything, 1 when every entry was already current
+# or left in place, and 2 when a link could not be made.
+skills_install() {
+  local plugin=$1 dir link raw changed=1 failed=0
+  if [[ ! -r "$plugin/skills/omdrop/SKILL.md" ]]; then
+    echo "omdrop could not find its skill at $plugin/skills/omdrop." >&2
+    return 2
+  fi
+  for dir in "${SKILL_DIRS[@]}"; do
+    [[ -d "$dir" ]] || continue
+    link="$dir/omdrop"
+    if [[ -L "$link" ]]; then
+      raw=$(readlink "$link")
+      [[ "$raw" == "$plugin/skills/omdrop" ]] && continue
+      if [[ -e "$link" && "$raw" != */plugins/*/skills/omdrop ]]; then
+        echo "Left $link alone: it points at $raw." >&2
+        continue
+      fi
+    elif [[ -e "$link" ]]; then
+      echo "Left $link alone: it is not a link omdrop made." >&2
+      continue
+    fi
+    if ln -sfn "$plugin/skills/omdrop" "$link"; then
+      changed=0
+    else
+      echo "omdrop could not link its skill at $link." >&2
+      failed=1
+    fi
+  done
+  (( changed == 0 )) && echo "Installed the omdrop skill for AI agents."
+  (( failed )) && return 2
+  return "$changed"
+}
+
+# Removes only links into some plugin's skills/omdrop or this one's, live or
+# dangling. Fails if any of those could not be removed.
+skills_remove() {
+  local dir link raw plugin failed=0
+  plugin=$(plugin_dir) || plugin=
+  for dir in "${SKILL_DIRS[@]}"; do
+    link="$dir/omdrop"
+    [[ -L "$link" ]] || continue
+    raw=$(readlink "$link")
+    [[ "$raw" == */plugins/*/skills/omdrop || ( -n "$plugin" && "$raw" == "$plugin/skills/omdrop" ) ]] || continue
+    rm -f "$link" || { echo "omdrop could not remove $link." >&2; failed=1; }
+  done
+  (( failed )) && return 1
+  echo "Removed the omdrop skill for AI agents."
+}
+
+cmd_skill() {
+  local plugin rc
+  case "${1:-}" in
+    install) plugin=$(plugin_dir) || die "omdrop cannot tell where it is installed."
+             skills_install "$plugin"; rc=$?
+             (( rc == 1 )) && echo "The omdrop skill for AI agents was already installed."
+             (( rc != 2 )) ;;
+    remove)  skills_remove ;;
+    *) die "usage: omdrop skill install|remove" ;;
+  esac
+}
+
 # A received link is a URL chosen by whoever is standing nearby, and while
 # discoverable to Everyone that is a one-tap phishing delivery. The receiver
 # stores links inert; nothing here opens one on its own. act_open exists only
@@ -2412,6 +2616,7 @@ case "${1:-status}" in
   setup)  shift; cmd_setup "$@" ;;
   doctor) shift; cmd_doctor "$@" ;;
   links)  shift; cmd_links "$@" ;;
+  skill|skills) shift; cmd_skill "$@" ;;
   open-link) shift; cmd_open_link "$@" ;;
   install-driver) shift; cmd_install_driver ;;
   firewall) shift; cmd_firewall "$@" ;;

@@ -84,9 +84,15 @@ omdrop send --verbose ~/photo.jpg # protocol log, for bug reports
 
 `start`, `stop`, `list`, and `vis` are aliases for `on`, `off`, `peers`, and `visibility`. Run `omdrop help` for the rest.
 
-Before sending from the command line, open a receive window with `omdrop on 10m`; the window is what hears nearby devices. `omdrop send` accepts `http` and `https` links, including several links in one transfer. A `.webloc` or `.url` file containing a web link is sent as that link so the recipient can open it in a browser, rather than as a downloaded shortcut. Other shortcut files remain files. Send links and files separately. If the installed sender lacks link support, update it with `omdrop install-driver`.
+`omdrop send` accepts `http` and `https` links, including several links in one transfer. A `.webloc` or `.url` file containing a web link is sent as that link so the recipient can open it in a browser, rather than as a downloaded shortcut. Other shortcut files remain files. Send links and files separately. If the installed sender lacks link support, update it with `omdrop install-driver`.
+
+For a named recipient, `omdrop send` searches for up to two minutes and reports devices as they answer. If Omdrop is off, it turns Omdrop on for the usual 10-minute window first; a send without a name needs Omdrop on already. Names match without regard to case; an exact name takes priority over a substring match. If several devices match, including duplicate exact names, choose one with `--to ADDRESS`. An unfinished lookup sends nothing, even if a matching name has already answered.
+
+`OMDROP_NAME_WAIT` sets the discovery timeout in decimal seconds (1–2147483647, default 120). Leading zeros are allowed; invalid values use the default. Stopping lookup processes can take up to two additional seconds, including when a helper stops producing output but remains alive. Cancellation stops the lookup and its probes. `--wait` controls the separate receiver-wake wait after discovery, not the name search.
 
 In `omdrop peers -n` output, `(no response)` means nothing answered on the AirDrop port, and `(anonymous)` means the device answered but withheld its name. To look up names without the Bluetooth announcement, add `--no-wake`; only devices already listening will answer. AWDL addresses change every session.
+
+`omdrop setup` installs a skill that tells AI agents how to use `omdrop`, linked as `omdrop` into each of `~/.agents/skills`, `~/.claude/skills`, `~/.codex/skills`, and `~/.pi/agent/skills` that exists; `omdrop on` keeps those links current. An existing `omdrop` entry is replaced only when it is a dangling link or a link into a plugin's `skills/omdrop`. `omdrop skill remove` removes those links.
 
 ## Contacts Only
 
@@ -179,6 +185,7 @@ Protocol dumps for bug reports are off by default. `omdrop send --verbose` write
 ```bash
 omdrop firewall remove
 omdrop links remove
+omdrop skill remove
 omarchy plugin remove netmojo.omdrop
 sudo pacman -R brcmfmac-awdl-dkms
 omdrop identity lock                # clear a cached identity

@@ -57,15 +57,40 @@ class SenderFixture(unittest.TestCase):
         self.sender = self.command(
             "send-to-peer",
             """#!/bin/sh
-[ "$1" = --help ] && { printf '%s\\n' "${SENDER_USAGE-  -n, --names  [file ...]}"; exit 0; }
+if [ "$1" = --help ]; then
+  if [ -n "$HELP_SLEEP" ]; then trap '' TERM; sleep "$HELP_SLEEP"; : > "$CAPTURE_LIST.outlived"; fi
+  printf '%s\\n' "${SENDER_USAGE-  -n, --names  [file ...]}"
+  exit 0
+fi
 out="$CAPTURE"
 [ "$1" = --list ] && out="$CAPTURE_LIST"
 : > "$out"
 for arg do printf '%s\\n' "$arg" >> "$out"; done
 if [ "$1" = --list ]; then
   [ -n "$LIST_RC" ] && { echo "could not read the peer table" >&2; exit "$LIST_RC"; }
+  # Both a silent pipe and EOF can come from a lookup that is still alive.
+  if [ -n "$LIST_SLEEP" ]; then
+    trap '' TERM
+    [ -z "$LIST_CLOSE_OUTPUT" ] || exec >/dev/null 2>&1
+    sleep "$LIST_SLEEP"
+    : > "$CAPTURE_LIST.outlived"
+  fi
+  if [ -n "$PEER_LIST_LATER" ] && [ -e "$CAPTURE_LIST.asked" ]; then
+    printf '%s\\n' "$PEER_LIST_LATER"; exit 0
+  fi
+  : > "$CAPTURE_LIST.asked"
   [ -n "$PEER_LIST" ] || exit 1
   printf '%s\\n' "$PEER_LIST"
+  if [ -n "$LIST_POST_SLEEP" ]; then
+    trap '' TERM
+    [ -z "$LIST_CLOSE_OUTPUT" ] || exec >/dev/null 2>&1
+    sleep "$LIST_POST_SLEEP"
+    : > "$CAPTURE_LIST.outlived"
+  fi
+  if [ -n "$PEER_LIST_TAIL" ]; then
+    sleep "${LIST_TAIL_DELAY:-0}"
+    printf '%s\\n' "$PEER_LIST_TAIL"
+  fi
   exit 0
 fi
 [ -n "$SENDER_STDOUT" ] && printf '%s\\n' "$SENDER_STDOUT"
@@ -85,18 +110,52 @@ exit "${SENDER_RC:-0}"
 echo "    inet6 fe80::1c9a:4bff:fe33:1/64 scope link"
 """,
         )
+        # Whether a window is open is the radio helper's to say: awdl0 keeps
+        # its address after `omdrop off`. WINDOW_JSON replaces the answer.
+        self.discoverable = self.command(
+            "omdrop-discoverable",
+            """#!/bin/sh
+[ -n "$WINDOW_JSON" ] && { printf '%s\\n' "$WINDOW_JSON"; exit 0; }
+if [ "${WINDOW:-${RADIO:-up}}" = up ]; then echo '{"visible":true}'; else echo '{"visible":false}'; fi
+""",
+        )
+        # A send that turns Omdrop on runs `omdrop on`, which starts with
+        # systemd. This one refuses everything and records that it was asked,
+        # so activation fails inside the sandbox: HOME is the temporary
+        # directory, so nothing is written to the real one.
+        self.systemctl_log = root / "systemctl.log"
+        self.command(
+            "systemctl",
+            """#!/bin/sh
+printf '%s\\n' "$*" >> "$SYSTEMCTL_LOG"
+exit 1
+""",
+        )
 
         self.env = os.environ.copy()
+        for key in ("XDG_DATA_HOME", "XDG_BIN_HOME"):
+            self.env.pop(key, None)
         self.env.update(
+            HOME=str(root),
             PATH=f"{self.bin}:{self.env['PATH']}",
             CAPTURE=str(self.capture),
             CAPTURE_LIST=str(self.capture_list),
             XDG_CONFIG_HOME=str(root / "config"),
+            SYSTEMCTL_LOG=str(self.systemctl_log),
             OMDROP_SENDER=str(self.sender),
+            OMDROP_DISCOVERABLE=str(self.discoverable),
             PEER_LIST=ONE_PEER,
             SENDER_STDOUT=SENT,
             LIST_RC="",
             SENDER_RC="",
+            OMDROP_NAME_WAIT="1",
+            LIST_SLEEP="",
+            LIST_POST_SLEEP="",
+            LIST_CLOSE_OUTPUT="",
+            HELP_SLEEP="",
+            PEER_LIST_LATER="",
+            PEER_LIST_TAIL="",
+            LIST_TAIL_DELAY="",
         )
 
     def command(self, name, body):
@@ -231,13 +290,15 @@ class SendLinkTests(SenderFixture):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(self.env["SENDER_STDOUT"], result.stdout)
 
-    def test_a_link_still_requires_the_radio_to_be_running(self):
+    def test_a_link_to_a_named_device_turns_omdrop_on_first(self):
         self.env["RADIO"] = "down"
 
         result = self.run_omdrop("send", "--to", "6c:58", "https://example.com/")
 
+        self.assertIn("Turning it on", result.stdout)
+        self.assertTrue(self.systemctl_log.exists(), "omdrop on was never run")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("omdrop on", result.stderr)
+        self.assertIn("could not be turned on", result.stderr)
         self.assertFalse(self.capture_list.exists())
         self.assertFalse(self.capture.exists())
 
@@ -386,14 +447,46 @@ class SendCommandTests(SenderFixture):
         self.assertIn("omdrop install-driver", several.stderr)
         self.assertEqual(one.returncode, 0, one.stderr)
 
-    def test_send_says_what_to_do_when_the_radio_is_down(self):
+    def test_with_omdrop_off_a_send_without_a_name_turns_nothing_on(self):
+        # In a window just opened, "the only device heard" is whichever
+        # device spoke first.
         self.env["RADIO"] = "down"
 
         result = self.run_omdrop("send", str(self.file))
 
         self.assertNotEqual(result.returncode, 0)
+        self.assertIn("omdrop send NAME", result.stderr)
         self.assertIn("omdrop on", result.stderr)
+        self.assertFalse(self.systemctl_log.exists())
+        self.assertFalse(self.capture_list.exists())
         self.assertFalse(self.capture.exists())
+
+    def test_an_address_left_behind_by_off_is_not_an_open_window(self):
+        self.env["WINDOW"] = "down"
+
+        result = self.run_omdrop("send", str(self.file))
+
+        self.assertIn("Omdrop is off", result.stderr)
+        self.assertFalse(self.capture_list.exists())
+
+    def test_an_open_window_is_read_from_the_helpers_json_however_it_is_spaced(self):
+        self.env["WINDOW_JSON"] = '{ "visible": true, "reason": null }'
+
+        result = self.run_omdrop("send", "--to", "6c:58", str(self.file))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Turning it on", result.stdout)
+        self.assertFalse(self.systemctl_log.exists())
+
+    def test_a_helper_answer_that_is_not_a_json_object_is_a_closed_window(self):
+        for answer in ("visible", '"visible"', '{"visible": "true"}'):
+            with self.subTest(answer=answer):
+                self.env["WINDOW_JSON"] = answer
+
+                result = self.run_omdrop("send", str(self.file))
+
+                self.assertIn("Omdrop is off", result.stderr)
+                self.assertFalse(self.capture_list.exists())
 
     def test_a_delivered_file_is_reported_without_the_protocol_log(self):
         result = self.run_omdrop("send", str(self.file))
@@ -531,6 +624,202 @@ class SendCommandTests(SenderFixture):
         result = self.run_omdrop("peers", "--json")
 
         self.assertEqual(json.loads(result.stdout), [])
+
+
+class NamedRecipientTests(SenderFixture):
+    def test_a_name_that_answers_on_a_later_lookup_is_found(self):
+        self.env.update(
+            OMDROP_NAME_WAIT="10",
+            PEER_LIST=f"{ONE_PEER}  (no response)",
+            PEER_LIST_LATER=f"{ONE_PEER}  Studio Mac",
+        )
+
+        result = self.run_omdrop("send", str(self.file), "Studio Mac")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Still looking", result.stdout)
+        self.assertEqual(result.stdout.count("Heard from Studio Mac."), 1)
+        self.assertEqual(self.sender_args()[self.sender_args().index("--mac") + 1],
+                         "e2:9d:03:6c:58:23")
+
+    def test_an_exact_name_wins_over_a_substring_match(self):
+        self.env.update(
+            OMDROP_NAME_WAIT="5",
+            PEER_LIST=f"{THREE_PEERS.splitlines()[0]}  Studio Mac Mini",
+            PEER_LIST_TAIL=f"{ONE_PEER}  Studio Mac",
+            LIST_TAIL_DELAY="1",
+        )
+
+        result = self.run_omdrop("send", "studio mac", str(self.file))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = self.sender_args()
+        self.assertEqual(args[args.index("--mac") + 1], "e2:9d:03:6c:58:23")
+
+    def test_duplicate_exact_names_are_refused_even_when_the_second_is_late(self):
+        self.env.update(
+            OMDROP_NAME_WAIT="5",
+            PEER_LIST="02:00:00:00:00:01  -40 dBm  [fe80::1%awdl0]:8770  Studio Mac",
+            PEER_LIST_TAIL="02:00:00:00:00:02  -50 dBm  [fe80::2%awdl0]:8770  STUDIO MAC",
+            LIST_TAIL_DELAY="1",
+        )
+
+        result = self.run_omdrop("send", "studio mac", str(self.file))
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("omdrop send --to 02:00:00:00:00:01", result.stderr)
+        self.assertIn("omdrop send --to 02:00:00:00:00:02", result.stderr)
+        self.assertFalse(self.capture.exists())
+
+    def test_ambiguous_substrings_are_refused(self):
+        self.env["PEER_LIST"] = "\n".join([
+            f"{ONE_PEER}  Studio Mac",
+            f"{THREE_PEERS.splitlines()[0]}  Studio Phone",
+        ])
+
+        result = self.run_omdrop("send", "studio", str(self.file))
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Several devices match", result.stderr)
+        self.assertFalse(self.capture.exists())
+
+    def test_a_unique_substring_selects_the_device(self):
+        self.env["PEER_LIST"] = f"{ONE_PEER}  Studio Mac"
+
+        result = self.run_omdrop("send", "studio", str(self.file))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.capture.exists())
+
+    def test_streaming_is_requested_only_when_supported(self):
+        self.env["PEER_LIST"] = f"{ONE_PEER}  Studio Mac"
+        for usage, expected in [
+            ("--names [file ...]", ["--list", "--names"]),
+            ("--names --stream [file ...]", ["--list", "--names", "--stream"]),
+        ]:
+            with self.subTest(usage=usage):
+                self.env["SENDER_USAGE"] = usage
+                result = self.run_omdrop("send", "Studio Mac", str(self.file))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.capture_list.read_text().splitlines(), expected)
+
+    def test_no_match_reports_answers_and_respects_the_retry_deadline(self):
+        self.env["PEER_LIST"] = f"{ONE_PEER}  Studio Phone"
+        start = time.monotonic()
+
+        result = subprocess.run([OMDROP, "send", "Studio Mac", str(self.file)],
+                                env=self.env, capture_output=True, text=True, timeout=5)
+
+        self.assertLess(time.monotonic() - start, 2.5)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Studio Phone", result.stderr)
+        self.assertIn("answered in 1 seconds", result.stderr)
+        self.assertFalse(self.capture.exists())
+
+    def test_named_lookup_errors_are_not_reported_as_an_empty_room(self):
+        self.env["LIST_RC"] = "4"
+
+        result = self.run_omdrop("send", "Studio Mac", str(self.file))
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("could not read the peer table", result.stderr)
+        self.assertNotIn("No Apple device", result.stderr)
+        self.assertFalse(self.capture.exists())
+
+    def test_name_wait_is_decimal_and_invalid_values_use_the_default(self):
+        self.env["PEER_LIST"] = f"{ONE_PEER}  Studio Mac"
+        for value, seconds in [
+            ("0008", 8), ("0000000000000000009", 9), ("2147483647", 2147483647),
+            ("0", 120), ("000", 120), ("-1", 120), ("1+1", 120),
+            ("08x", 120), ("2147483648", 120), ("99999999999999999999", 120),
+        ]:
+            with self.subTest(value=value):
+                self.env["OMDROP_NAME_WAIT"] = value
+                result = self.run_omdrop("send", "Studio Mac", str(self.file))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(f"(up to {seconds}s)", result.stdout)
+                self.assertNotIn("value too great", result.stderr)
+
+    def assert_lookup_is_bounded(self, **settings):
+        self.env.update(settings)
+        start = time.monotonic()
+        result = subprocess.run([OMDROP, "send", "Studio Mac", str(self.file)],
+                                env=self.env, capture_output=True, text=True, timeout=8)
+        elapsed = time.monotonic() - start
+
+        self.assertLess(elapsed, 4.5, "lookup or cleanup exceeded the deadline and grace")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Name lookup did not finish", result.stderr)
+        self.assertFalse(self.capture.exists())
+        # Check after the fake child would have completed, not immediately
+        # after cancellation when even an orphan has not left its mark yet.
+        time.sleep(max(0, 5.5 - elapsed))
+        self.assertFalse(Path(f"{self.capture_list}.outlived").exists())
+        return result
+
+    def test_a_silent_child_with_an_open_pipe_is_stopped(self):
+        self.assert_lookup_is_bounded(LIST_SLEEP="5")
+
+    def test_a_live_child_with_closed_output_is_stopped(self):
+        self.assert_lookup_is_bounded(LIST_SLEEP="5", LIST_CLOSE_OUTPUT="1")
+
+    def test_a_hung_capability_probe_is_also_bounded(self):
+        self.assert_lookup_is_bounded(HELP_SLEEP="5")
+
+    def test_a_matching_row_followed_by_a_hang_never_selects_a_recipient(self):
+        for closed_output in ("", "1"):
+            with self.subTest(closed_output=bool(closed_output)):
+                result = self.assert_lookup_is_bounded(
+                    LIST_POST_SLEEP="5",
+                    LIST_CLOSE_OUTPUT=closed_output,
+                    PEER_LIST=f"{ONE_PEER}  Studio Mac",
+                    PEER_LIST_TAIL=(
+                        "02:00:00:00:00:02  -50 dBm  [fe80::2%awdl0]:8770  Studio Mac"
+                    ),
+                )
+                self.assertIn("Heard from Studio Mac.", result.stdout)
+                self.assertIn("nothing was sent", result.stderr)
+                self.assertIn(f"  {ONE_PEER}  Studio Mac", result.stderr)
+
+    def test_cancelling_named_discovery_stops_the_lookup(self):
+        self.env.update(OMDROP_NAME_WAIT="30", LIST_SLEEP="5")
+        proc = subprocess.Popen([OMDROP, "send", "Studio Mac", str(self.file)],
+                                env=self.env, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: proc.poll() is None and proc.kill())
+        deadline = time.monotonic() + 5
+        while not self.capture_list.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(self.capture_list.exists(), "lookup never started")
+
+        proc.terminate()
+        _, err = proc.communicate(timeout=5)
+        time.sleep(5.5)
+
+        self.assertEqual(proc.returncode, 130)
+        self.assertIn("Cancelled", err)
+        self.assertFalse(self.capture.exists())
+        self.assertFalse(Path(f"{self.capture_list}.outlived").exists())
+
+    def test_cancelling_between_lookup_passes_is_reported(self):
+        self.env.update(OMDROP_NAME_WAIT="30", PEER_LIST="")
+        output = Path(self.tmp.name) / "progress"
+        with output.open("w") as stream:
+            proc = subprocess.Popen([OMDROP, "send", "Studio Mac", str(self.file)],
+                                    env=self.env, stdout=stream,
+                                    stderr=subprocess.PIPE, text=True)
+            self.addCleanup(lambda: proc.poll() is None and proc.kill())
+            deadline = time.monotonic() + 5
+            while "Still looking" not in output.read_text() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertIn("Still looking", output.read_text())
+
+            proc.terminate()
+            _, err = proc.communicate(timeout=5)
+
+        self.assertEqual(proc.returncode, 130)
+        self.assertIn("Cancelled", err)
+        self.assertFalse(self.capture.exists())
 
 
 class SendPickTests(SenderFixture):
