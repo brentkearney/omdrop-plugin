@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -123,6 +124,67 @@ class RadioBackendTests(unittest.TestCase):
             self.skipTest("this machine lacks the receiver's packages; covered above")
         self.assertIn("Nothing to do", result.stdout)
         self.assertIn("owl 0.1.0", result.stdout)
+
+
+    def test_a_probe_that_hangs_is_the_backends_problem_not_a_missing_mac(self):
+        # The child sleep keeps stdout open after the shell is killed, which
+        # is what a hung helper usually looks like.
+        self.command("omdrop-discoverable",
+                     '#!/bin/sh\n[ "$1" = probe ] || exit 2\nsleep 30\necho "{}"\n')
+        self.env["OMDROP_PROBE_TIMEOUT"] = "1"
+        start = time.monotonic()
+        missing = self.doctor()["missing"]
+        self.assertLess(time.monotonic() - start, 10)
+        self.assertEqual(missing[0]["id"], "backend")
+        self.assertIn("did not answer", missing[0]["say"])
+        self.assertNotIn(BROADCOM_SAYS, json.dumps(missing))
+
+    def test_install_refuses_when_the_probe_hangs(self):
+        self.command("omdrop-discoverable",
+                     '#!/bin/sh\n[ "$1" = probe ] || exit 2\nsleep 30\n')
+        self.env["OMDROP_PROBE_TIMEOUT"] = "1"
+        result = self.omdrop("install-driver")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("did not answer", result.stderr)
+        for broadcom in ("brcmfmac-awdl-dkms", "makepkg", "omdrop-awdl"):
+            self.assertNotIn(broadcom, result.stdout)
+
+    def test_an_answer_without_a_backend_name_is_not_a_probe(self):
+        self.command("omdrop-discoverable", helper({"visible": True}))
+        self.assertIn(BROADCOM_SAYS, self.doctor()["missing"][0]["say"])
+
+    def test_a_backend_below_the_minimum_contract_is_a_blocker_that_names_it(self):
+        for contract in ("0.1.0", None):
+            with self.subTest(contract=contract):
+                probe = {"backend": "owl", "version": "0.1.0", "hardware": True, "missing": []}
+                if contract:
+                    probe["contract"] = contract
+                self.command("omdrop-discoverable", helper(probe))
+                first = self.doctor()["missing"][0]
+                self.assertEqual(first["id"], "backend")
+                self.assertIn("owl", first["say"])
+                self.assertIn(contract or "none", first["say"])
+
+    def test_a_backend_cannot_claim_the_ids_the_panel_acts_on(self):
+        self.command("omdrop-discoverable", helper({
+            "backend": "owl", "version": "0.1.0", "hardware": True, "contract": "0.8.1",
+            "missing": [{"id": "driver", "say": "The OWL daemon is missing."},
+                        {"id": "radio", "say": "Wi-Fi is not connected."}]}))
+        ids = [m["id"] for m in self.doctor()["missing"]]
+        self.assertEqual(ids[:2], ["backend-driver", "radio"])
+        self.assertNotIn("driver", ids)
+
+    def test_a_missing_sender_names_the_backend_not_install_driver(self):
+        self.command("omdrop-discoverable", helper({
+            "backend": "owl", "version": "0.1.0", "hardware": True, "contract": "0.8.1",
+            "missing": []}))
+        self.env["OMDROP_SENDER"] = str(self.bin / "nothing-here")
+        photo = Path(self.tmp.name) / "photo.jpg"
+        photo.write_bytes(b"x")
+        result = self.omdrop("send", str(photo))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("(owl)", result.stderr)
+        self.assertNotIn("Update it with: omdrop install-driver", result.stderr)
 
 
 if __name__ == "__main__":

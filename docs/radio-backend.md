@@ -48,18 +48,39 @@ with its usage and exit 2) gets those checks, unchanged.
 }
 ```
 
-- `backend`, `version`: shown to people, for example by `omdrop install-driver`.
+It must answer within 5 seconds. A helper that doesn't is reported as a
+`backend` item ("The radio backend did not answer…"), not taken for
+omdrop-awdl, and `omdrop install-driver` refuses to run.
+
+- `backend` (required), `version`: shown to people, for example by
+  `omdrop install-driver` and in messages that ask for a newer backend. An
+  answer without `backend` doesn't count as a probe.
 - `contract`: the omdrop-awdl version whose helper contract this backend follows.
-  Features gated on a driver version (keeping the identity in 1Password needs
-  0.7.0) compare against this instead of the `brcmfmac-awdl-dkms` package.
+  It must be at least the plugin's minimum (`BACKEND_CONTRACT_MIN` in
+  `bin/omdrop`, now 0.7.0); a backend below it, or naming none, gets a `backend`
+  item that says so. Features gated on a driver version (keeping the identity in
+  1Password needs 0.7.0) compare against this instead of the
+  `brcmfmac-awdl-dkms` package. Newer helper features, such as sending links,
+  are found by asking the sender, so they need no contract bump.
 - `hardware`: false when this machine has no radio the backend can drive. Then
   only the `hardware` item from `missing` is shown, as for a non-Mac today.
 - `missing`: what stands in the way, most fundamental first, as
-  `{"id", "say"}`. `say` is one sentence for the person holding the laptop. The
-  plugin adds its own items after these: `library` (the receiver's packages)
-  and `service` (the receiving service). The panel offers to fix `library`.
+  `{"id", "say"}`. `say` is one sentence for the person holding the laptop.
+
+### Item IDs
+
+`driver`, `library` and `service` belong to the plugin, and the panel acts on
+them: it offers its install button for `driver` and `library`, and that button
+runs `omdrop install-driver`, which can't fix anything of a backend's. A
+backend's item under one of these IDs is shown as `backend-<id>`, without the
+button. Use your own IDs instead, such as `radio` or `backend`.
+
+The plugin adds its own items after the backend's: `library` (the receiver's
+packages) and `service` (the receiving service). It reports `backend` itself
+when the probe doesn't answer or the contract is too old.
 
 With a probing backend, `omdrop install-driver` installs only what belongs to
 the plugin: the receiver's packages, and its firewall rule when ufw is active.
 The backend is a package of its own, installed before the plugin can ask it
-anything.
+anything, so messages that ask for a newer helper name the backend's package
+instead of `omdrop install-driver`.

@@ -52,6 +52,7 @@ omdrop send NAME URL...         # web links: they open in NAME's browser
 | `Peers must be in "Everyone" mode` | This computer is using a self-signed identity. Ask the user to set AirDrop on the recipient to Everyone for 10 Minutes. |
 | `They declined it.` | The recipient refused. Do not resend unless the user asks. |
 | `needs a newer Wi-Fi driver package` | Tell the user to run `omdrop install-driver` in a terminal. It needs their password. |
+| `needs a newer radio backend` | Tell the user to update the package the message names. `omdrop install-driver` cannot update it. |
 | `could not read the peer table` | Show the user the whole message: it carries the radio helper's own reason. If it says the session has no seat, the user can run the command from their desktop session instead. |
 
 ## Receiving and status
