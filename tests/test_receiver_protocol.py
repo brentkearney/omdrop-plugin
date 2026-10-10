@@ -10,6 +10,7 @@ import http.client
 import json
 import os
 import plistlib
+import re
 import shutil
 import socket
 import ssl
@@ -245,6 +246,64 @@ class StalledHandshakeTests(ReceiverFixture):
         status, _ = self.post(self.connection(), "/Discover",
                               plistlib.dumps({}, fmt=plistlib.FMT_BINARY))
         self.assertEqual(status, 200)
+
+
+def receiver_seconds(name):
+    """One of the receiver's timeout constants, so the test follows its value."""
+    return int(re.search(rf"^{name} = (\d+)$", SERVE.read_text(), re.M).group(1))
+
+
+class UploadWaitTests(ReceiverFixture):
+    def ask(self, conn, transfer_type, items=()):
+        status, _ = self.post(conn, "/Ask", plistlib.dumps({
+            "SenderComputerName": "Mac", "SenderModelName": "MacBookPro18,3",
+            "TransferType": {transfer_type: 1}, "Items": list(items),
+            "Files": [{"FileName": "late.txt", "FileType": "public.plain-text", "FileSize": 5}],
+        }, fmt=plistlib.FMT_BINARY))
+        self.assertEqual(status, 200)
+
+    def upload(self, conn, name, data):
+        status, _ = self.post(conn, "/Upload", dvzip([(name, data)]),
+                              {"Content-Type": "application/x-dvzip", "TransferID": name})
+        return status
+
+    def closed_by_receiver(self, conn):
+        # Read, never write: a failed TLS write here made the client's next
+        # read on another connection fail too.
+        conn.sock.settimeout(2)
+        try:
+            return conn.sock.recv(1) == b""
+        except TimeoutError:
+            return False
+        except (ssl.SSLError, ConnectionError):
+            return True
+
+    def test_an_accepted_ask_waits_past_the_idle_limit_for_its_upload_and_nothing_else_does(self):
+        idle = receiver_seconds("READ_IDLE_TIMEOUT_SECONDS")
+        wait = receiver_seconds("UPLOAD_WAIT_SECONDS")
+        self.assertGreater(wait, idle + 5, "the test needs room between the two limits")
+
+        late = self.connection()
+        self.ask(late, "files")
+        link = self.connection()
+        self.ask(link, "links", ["https://example.com/"])
+        finished = self.connection()
+        self.ask(finished, "files")
+        self.assertEqual(self.upload(finished, "early.txt", b"early"), 200)
+        stalled = self.connection()
+        self.ask(stalled, "files")
+        stalled.sock.sendall(b"P")
+
+        time.sleep(idle + 3)
+
+        # A links Ask has no Upload to wait for, and a finished Upload puts the
+        # connection back on the idle limit. So does a request that started
+        # and then stopped partway through its first line.
+        self.assertTrue(self.closed_by_receiver(link))
+        self.assertTrue(self.closed_by_receiver(finished))
+        self.assertTrue(self.closed_by_receiver(stalled))
+        self.assertEqual(self.upload(late, "late.txt", b"late\n"), 200)
+        self.assertEqual((self.out / "late.txt").read_bytes(), b"late\n")
 
 
 if __name__ == "__main__":
