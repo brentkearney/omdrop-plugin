@@ -215,6 +215,8 @@ omdrop -- send and receive files with nearby Apple devices
   links ACTION      install or remove the double-click handler for received
                     .url and .webloc links
   open-link FILE    open a .url or .webloc link in the browser (web links only)
+  skill ACTION      install or remove the skill that tells AI agents how to
+                    use omdrop (setup installs it)
   version           the plugin version, for bug reports
 
 Aliases, if you reach for a different word:
@@ -646,6 +648,8 @@ setup_install() {
   # Received links are stored as .url files, and a Mac may send a .webloc.
   # Without this, double-clicking one opens it in a text editor.
   links_install "$plugin" && did=1
+  # So an AI agent asked to AirDrop something knows this command exists.
+  skills_install "$plugin" && did=1
 
   if [[ -z "$(cfg_get name)" ]]; then
     cfg_set name "$(default_name)" \
@@ -1092,6 +1096,7 @@ cmd_on() {
     local plugin
     plugin=$(plugin_dir) || { echo "omdrop cannot tell where it is installed." >&2; return 1; }
     unit_install "$plugin" || true
+    skills_install "$plugin" >/dev/null 2>&1 || true
     prepare_identity >&2 || return 1
     ensure_tls; (( $? == 2 )) && return 1
     # The unit may write opt-in protocol dumps only here (ReadWritePaths= with
@@ -2242,6 +2247,78 @@ cmd_links() {
   esac
 }
 
+# The skill that tells an AI agent how to use omdrop, linked into the skill
+# directories Omarchy provisions for the agents it launches. Only directories
+# that already exist: a missing one belongs to an agent that is not installed.
+SKILL_DIRS=("$HOME/.agents/skills" "$HOME/.claude/skills" "$HOME/.codex/skills" "$HOME/.pi/agent/skills")
+
+# An entry named omdrop is replaced only when it is absent, a dangling link,
+# or a link into some plugin's skills/omdrop -- the same rule as the command
+# on PATH. Judged by the link's own target, not its resolution: a plugin
+# directory can itself be a link into a source checkout. Anything else, a
+# directory or a live link elsewhere, is left in place with a message.
+# Returns 0 when it linked anything, 1 when every entry was already current
+# or left in place, and 2 when a link could not be made.
+skills_install() {
+  local plugin=$1 dir link raw changed=1 failed=0
+  if [[ ! -r "$plugin/skills/omdrop/SKILL.md" ]]; then
+    echo "omdrop could not find its skill at $plugin/skills/omdrop." >&2
+    return 2
+  fi
+  for dir in "${SKILL_DIRS[@]}"; do
+    [[ -d "$dir" ]] || continue
+    link="$dir/omdrop"
+    if [[ -L "$link" ]]; then
+      raw=$(readlink "$link")
+      [[ "$raw" == "$plugin/skills/omdrop" ]] && continue
+      if [[ -e "$link" && "$raw" != */plugins/*/skills/omdrop ]]; then
+        echo "Left $link alone: it points at $raw." >&2
+        continue
+      fi
+    elif [[ -e "$link" ]]; then
+      echo "Left $link alone: it is not a link omdrop made." >&2
+      continue
+    fi
+    if ln -sfn "$plugin/skills/omdrop" "$link"; then
+      changed=0
+    else
+      echo "omdrop could not link its skill at $link." >&2
+      failed=1
+    fi
+  done
+  (( changed == 0 )) && echo "Installed the omdrop skill for AI agents."
+  (( failed )) && return 2
+  return "$changed"
+}
+
+# Removes only links into some plugin's skills/omdrop or this one's, live or
+# dangling. Fails if any of those could not be removed.
+skills_remove() {
+  local dir link raw plugin failed=0
+  plugin=$(plugin_dir) || plugin=
+  for dir in "${SKILL_DIRS[@]}"; do
+    link="$dir/omdrop"
+    [[ -L "$link" ]] || continue
+    raw=$(readlink "$link")
+    [[ "$raw" == */plugins/*/skills/omdrop || ( -n "$plugin" && "$raw" == "$plugin/skills/omdrop" ) ]] || continue
+    rm -f "$link" || { echo "omdrop could not remove $link." >&2; failed=1; }
+  done
+  (( failed )) && return 1
+  echo "Removed the omdrop skill for AI agents."
+}
+
+cmd_skill() {
+  local plugin rc
+  case "${1:-}" in
+    install) plugin=$(plugin_dir) || die "omdrop cannot tell where it is installed."
+             skills_install "$plugin"; rc=$?
+             (( rc == 1 )) && echo "The omdrop skill for AI agents was already installed."
+             (( rc != 2 )) ;;
+    remove)  skills_remove ;;
+    *) die "usage: omdrop skill install|remove" ;;
+  esac
+}
+
 # A received link is a URL chosen by whoever is standing nearby, and while
 # discoverable to Everyone that is a one-tap phishing delivery. The receiver
 # stores links inert; nothing here opens one on its own. act_open exists only
@@ -2539,6 +2616,7 @@ case "${1:-status}" in
   setup)  shift; cmd_setup "$@" ;;
   doctor) shift; cmd_doctor "$@" ;;
   links)  shift; cmd_links "$@" ;;
+  skill|skills) shift; cmd_skill "$@" ;;
   open-link) shift; cmd_open_link "$@" ;;
   install-driver) shift; cmd_install_driver ;;
   firewall) shift; cmd_firewall "$@" ;;
