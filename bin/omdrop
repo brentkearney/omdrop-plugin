@@ -171,8 +171,8 @@ omdrop -- send and receive files with nearby Apple devices
                     send files to a nearby Apple device, as one transfer
                     it accepts once, or send http/https links. A .webloc or
                     .url file holding a web link goes as that link.
-                    Send links and files separately. Turn a window on first
-                    (omdrop on): that is what hears the devices around you.
+                    Send links and files separately. With Omdrop off, a
+                    send to NAME turns it on for the usual window first.
                     NAME searches for up to two minutes, reporting devices
                     as they answer; OMDROP_NAME_WAIT sets this in seconds.
                     An exact name wins over a partial match; duplicate names
@@ -1320,6 +1320,20 @@ require_sender() {
     || die "The Apple-compatible radio is not running, so nobody can be heard and nothing can be sent. Start it with: omdrop on 10m"
 }
 
+# Whether a window is open: awdl0 has its link-local address and the radio
+# helper reports itself visible. The address alone outlives `omdrop off`. The
+# helper's answer is read as JSON, so any valid spelling of it counts.
+radio_on() {
+  awdl_link_local || return 1
+  [[ -x "$DISCOVERABLE" ]] || return 0
+  "$DISCOVERABLE" status --json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    sys.exit(0 if json.load(sys.stdin).get("visible") is True else 1)
+except (ValueError, AttributeError):
+    sys.exit(1)'
+}
+
 # A driver older than 0.5.0 sends one file only. Its usage line is what says
 # so, and asking it is cheaper than keeping a table of driver versions.
 sender_takes_several_files() {
@@ -1644,7 +1658,8 @@ cmd_send() {
   if [[ -n "$to" ]]; then
     [[ "$to" != *$'\n'* ]] || die "send: a recipient is one name or address, not several lines"
   fi
-  require_sender
+  [[ -x "$SENDER" ]] \
+    || die "The program that sends files is not installed. It comes with the Wi-Fi driver: omdrop install-driver"
   # The driver package owns the sender, and a driver older than this plugin
   # takes one file only. Say so, rather than surface its argparse error.
   if (( ${#files[@]} > 1 )) && ! sender_takes_several_files; then
@@ -1652,6 +1667,21 @@ cmd_send() {
   fi
   if (( ${#urls[@]} )) && ! "$SENDER" --help 2>&1 | grep -q -- '--url'; then
     die "Sending a link needs a newer Wi-Fi driver package. Update it with: omdrop install-driver"
+  fi
+
+  # A closed window hears nobody, so a send to a named device opens one, as
+  # the panel's Send section does, for the usual window. A send without a
+  # name needs the window open first: in a window just opened, "the only
+  # device heard" is whichever device spoke first.
+  if ! radio_on; then
+    local example; printf -v example ' %q' "${urls[@]}" "${files[@]}"
+    [[ -n "$to" ]] || die "Omdrop is off, so no device can be heard. Name the device, and omdrop turns itself on to find it:
+  omdrop send NAME$example
+Or turn it on first, with: omdrop on"
+    printf 'Omdrop is off. Turning it on for %s, so nearby devices can be heard...\n' "$DEFAULT_WINDOW"
+    "$SELF" on >/dev/null || die "Omdrop could not be turned on, so nothing was sent."
+    radio_on || die "Omdrop turned on, but the radio is not up yet, so nothing was sent. Try again in a few seconds."
+    printf 'Omdrop is on, and visible nearby until the window ends. Turn it off sooner with: omdrop off\n'
   fi
 
   choose_peer "$to" "${urls[@]}" "${files[@]}"

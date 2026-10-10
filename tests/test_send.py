@@ -110,14 +110,40 @@ exit "${SENDER_RC:-0}"
 echo "    inet6 fe80::1c9a:4bff:fe33:1/64 scope link"
 """,
         )
+        # Whether a window is open is the radio helper's to say: awdl0 keeps
+        # its address after `omdrop off`. WINDOW_JSON replaces the answer.
+        self.discoverable = self.command(
+            "omdrop-discoverable",
+            """#!/bin/sh
+[ -n "$WINDOW_JSON" ] && { printf '%s\\n' "$WINDOW_JSON"; exit 0; }
+if [ "${WINDOW:-${RADIO:-up}}" = up ]; then echo '{"visible":true}'; else echo '{"visible":false}'; fi
+""",
+        )
+        # A send that turns Omdrop on runs `omdrop on`, which starts with
+        # systemd. This one refuses everything and records that it was asked,
+        # so activation fails inside the sandbox: HOME is the temporary
+        # directory, so nothing is written to the real one.
+        self.systemctl_log = root / "systemctl.log"
+        self.command(
+            "systemctl",
+            """#!/bin/sh
+printf '%s\\n' "$*" >> "$SYSTEMCTL_LOG"
+exit 1
+""",
+        )
 
         self.env = os.environ.copy()
+        for key in ("XDG_DATA_HOME", "XDG_BIN_HOME"):
+            self.env.pop(key, None)
         self.env.update(
+            HOME=str(root),
             PATH=f"{self.bin}:{self.env['PATH']}",
             CAPTURE=str(self.capture),
             CAPTURE_LIST=str(self.capture_list),
             XDG_CONFIG_HOME=str(root / "config"),
+            SYSTEMCTL_LOG=str(self.systemctl_log),
             OMDROP_SENDER=str(self.sender),
+            OMDROP_DISCOVERABLE=str(self.discoverable),
             PEER_LIST=ONE_PEER,
             SENDER_STDOUT=SENT,
             LIST_RC="",
@@ -264,13 +290,15 @@ class SendLinkTests(SenderFixture):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(self.env["SENDER_STDOUT"], result.stdout)
 
-    def test_a_link_still_requires_the_radio_to_be_running(self):
+    def test_a_link_to_a_named_device_turns_omdrop_on_first(self):
         self.env["RADIO"] = "down"
 
         result = self.run_omdrop("send", "--to", "6c:58", "https://example.com/")
 
+        self.assertIn("Turning it on", result.stdout)
+        self.assertTrue(self.systemctl_log.exists(), "omdrop on was never run")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("omdrop on", result.stderr)
+        self.assertIn("could not be turned on", result.stderr)
         self.assertFalse(self.capture_list.exists())
         self.assertFalse(self.capture.exists())
 
@@ -419,14 +447,46 @@ class SendCommandTests(SenderFixture):
         self.assertIn("omdrop install-driver", several.stderr)
         self.assertEqual(one.returncode, 0, one.stderr)
 
-    def test_send_says_what_to_do_when_the_radio_is_down(self):
+    def test_with_omdrop_off_a_send_without_a_name_turns_nothing_on(self):
+        # In a window just opened, "the only device heard" is whichever
+        # device spoke first.
         self.env["RADIO"] = "down"
 
         result = self.run_omdrop("send", str(self.file))
 
         self.assertNotEqual(result.returncode, 0)
+        self.assertIn("omdrop send NAME", result.stderr)
         self.assertIn("omdrop on", result.stderr)
+        self.assertFalse(self.systemctl_log.exists())
+        self.assertFalse(self.capture_list.exists())
         self.assertFalse(self.capture.exists())
+
+    def test_an_address_left_behind_by_off_is_not_an_open_window(self):
+        self.env["WINDOW"] = "down"
+
+        result = self.run_omdrop("send", str(self.file))
+
+        self.assertIn("Omdrop is off", result.stderr)
+        self.assertFalse(self.capture_list.exists())
+
+    def test_an_open_window_is_read_from_the_helpers_json_however_it_is_spaced(self):
+        self.env["WINDOW_JSON"] = '{ "visible": true, "reason": null }'
+
+        result = self.run_omdrop("send", "--to", "6c:58", str(self.file))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Turning it on", result.stdout)
+        self.assertFalse(self.systemctl_log.exists())
+
+    def test_a_helper_answer_that_is_not_a_json_object_is_a_closed_window(self):
+        for answer in ("visible", '"visible"', '{"visible": "true"}'):
+            with self.subTest(answer=answer):
+                self.env["WINDOW_JSON"] = answer
+
+                result = self.run_omdrop("send", str(self.file))
+
+                self.assertIn("Omdrop is off", result.stderr)
+                self.assertFalse(self.capture_list.exists())
 
     def test_a_delivered_file_is_reported_without_the_protocol_log(self):
         result = self.run_omdrop("send", str(self.file))
