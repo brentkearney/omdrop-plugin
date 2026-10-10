@@ -92,6 +92,8 @@ For a named recipient, `omdrop send` searches for up to two minutes and reports 
 
 In `omdrop peers -n` output, `(no response)` means nothing answered on the AirDrop port, and `(anonymous)` means the device answered but withheld its name. To look up names without the Bluetooth announcement, add `--no-wake`; only devices already listening will answer. AWDL addresses change every session.
 
+`omdrop setup` installs a skill that tells AI agents how to use `omdrop`, linked as `omdrop` into each of `~/.agents/skills`, `~/.claude/skills`, `~/.codex/skills`, and `~/.pi/agent/skills` that exists; `omdrop on` keeps those links current. An existing `omdrop` entry is replaced only when it is a dangling link or a link into a plugin's `skills/omdrop`. `omdrop skill remove` removes those links.
+
 ## Contacts Only
 
 To accept files only from people you choose:
@@ -183,6 +185,7 @@ Protocol dumps for bug reports are off by default. `omdrop send --verbose` write
 ```bash
 omdrop firewall remove
 omdrop links remove
+omdrop skill remove
 omarchy plugin remove netmojo.omdrop
 sudo pacman -R brcmfmac-awdl-dkms
 omdrop identity lock                # clear a cached identity
