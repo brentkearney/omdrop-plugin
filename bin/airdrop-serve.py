@@ -234,6 +234,13 @@ GIB = 1024 * MIB
 # configure that percentage with `omdrop limit`.
 READ_IDLE_TIMEOUT_SECONDS = 30
 INITIAL_READ_SECONDS = 60
+# How long an accepted Ask waits for its Upload on the same connection. The
+# sender uploads straight after the Ask is answered, but a poor AWDL link can
+# delay that request past the idle limit; 60 s covers the roughly 45 s a Mac
+# sender has been seen waiting. Only the wait for the next request line gets
+# this: its headers and body go back to READ_IDLE_TIMEOUT_SECONDS, and no
+# upload slot is held meanwhile.
+UPLOAD_WAIT_SECONDS = 60
 MIN_READ_BYTES_PER_SECOND = 64 * KIB
 MAX_METADATA_BYTES = 1 * MIB
 MAX_ARCHIVE_MEMBERS = 512
@@ -646,6 +653,9 @@ class Handler(BaseHTTPRequestHandler):
     """
 
     protocol_version = 'HTTP/1.1'
+    # Set once an accepted Ask expects an Upload on this connection, and
+    # cleared when the next request's first byte arrives.
+    awaiting_upload = False
 
     def setup(self):
         # Applies to the TLS handshake, request headers and every body read. A
@@ -662,6 +672,23 @@ class Handler(BaseHTTPRequestHandler):
                          self.client_address[0], self.client_address[1], e)
             raise HandshakeFailed from e
         super().setup()
+
+    def handle_one_request(self):
+        # The Upload wait covers only the gap before the next request starts.
+        # Its first byte ends it, so a request line, headers or body that stall
+        # get the ordinary idle limit. peek() blocks for that byte, counts any
+        # already buffered, and consumes nothing.
+        if self.awaiting_upload:
+            try:
+                self.rfile.peek(1)
+            except TimeoutError:
+                logging.warning('no Upload within %d s of an accepted Ask; closing the connection',
+                                UPLOAD_WAIT_SECONDS)
+                self.close_connection = True
+                return
+            self.awaiting_upload = False
+            self.request.settimeout(READ_IDLE_TIMEOUT_SECONDS)
+        super().handle_one_request()
 
     def handle_expect_100(self):
         # BaseHTTPRequestHandler would acknowledge an upload before its framing
@@ -844,6 +871,11 @@ class Handler(BaseHTTPRequestHandler):
         }, fmt=plistlib.FMT_BINARY)
         write_debug(resp, 'receive_ask_response.plist')
         self.answer(resp)
+        # A links Ask is the whole transfer; every other kind is followed by
+        # an Upload on this connection.
+        if 'links' not in (ask.get('TransferType') or {}):
+            self.awaiting_upload = True
+            self.request.settimeout(UPLOAD_WAIT_SECONDS)
 
     def handle_upload(self):
         # An Upload that never passed an Ask has nothing vouching for it, and
