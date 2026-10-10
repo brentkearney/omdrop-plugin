@@ -173,11 +173,13 @@ omdrop -- send and receive files with nearby Apple devices
                     .url file holding a web link goes as that link.
                     Send links and files separately. Turn a window on first
                     (omdrop on): that is what hears the devices around you.
-                    NAME chooses a device by name; --to ADDRESS chooses
-                    by part of its address. --wait SECONDS keeps trying
-                    while an iPhone's receiver is asleep (default 30),
-                    announcing this machine over Bluetooth to wake it.
-                    --pick asks for the files in a chooser instead.
+                    NAME searches for up to two minutes, reporting devices
+                    as they answer; OMDROP_NAME_WAIT sets this in seconds.
+                    An exact name wins over a partial match; duplicate names
+                    need --to ADDRESS. Cleanup can take two more seconds.
+                    --wait SECONDS waits for an iPhone's receiver to wake
+                    (default 30), separately from finding its name, announcing
+                    this machine over Bluetooth. --pick opens a file chooser.
   peers [-n]        the Apple devices nearby right now. -n also asks
                     each one for its name, which means connecting to it and
                     showing this machine to every device listed, and briefly
@@ -1378,8 +1380,98 @@ narrate_send() {
 # when the answer was polkit (send-to-peer's own lesson, 2026-09-18). Only its
 # exit 1, "the table is empty", means an empty room.
 PEER=
+
+# Decimal seconds for named discovery. Strip leading zeros before arithmetic,
+# and bound the input before conversion so oversized values cannot wrap.
+NAME_WAIT=${OMDROP_NAME_WAIT:-120}
+NAME_WAIT=${NAME_WAIT#"${NAME_WAIT%%[!0]*}"}
+if [[ "$NAME_WAIT" =~ ^[0-9]{1,10}$ ]] && (( 10#$NAME_WAIT <= 2147483647 )); then
+  NAME_WAIT=$(( 10#$NAME_WAIT ))
+else
+  NAME_WAIT=120
+fi
+
+# Keep answers across passes, but finish each pass before choosing: another
+# device may have the same name. `listing` and `rc` belong to choose_peer.
+find_by_name() {
+  local want=$1 shown=$2 line mac name pid= found=0 other= note_at=0 left timed_out fd
+  local deadline=$(( SECONDS + NAME_WAIT ))
+  local -A row_of=() said=()
+  trap '[[ -z "$pid" ]] || stop_group "$pid"; echo "Cancelled." >&2; exit 130' TERM INT HUP
+  printf 'Looking for "%s" nearby (up to %ds)...\n' "$shown" "$NAME_WAIT"
+  while :; do
+    left=$(( deadline - SECONDS ))
+    (( left > 0 )) || break
+    other= timed_out=0
+    # timeout bounds both the capability probe and the lookup, including a
+    # child that closes its output but stays alive. Its session also contains
+    # probes and Bluetooth advertising, so cancellation stops them together.
+    # The two-second grace matches stop_group; neither wait can run forever.
+    exec {fd}< <(exec setsid timeout --kill-after=2 "$left" bash -c '
+      sender=$1
+      flags=()
+      "$sender" --help 2>&1 | grep -- "--stream" >/dev/null && flags=(--stream)
+      exec "$sender" --list --names "${flags[@]}"
+    ' bash "$SENDER" 2>&1)
+    pid=$!
+    while :; do
+      left=$(( deadline - SECONDS ))
+      (( left > 0 )) || { timed_out=1; break; }
+      IFS= read -r -t "$left" line <&"$fd" || { rc=$?; (( rc > 128 )) && timed_out=1; break; }
+      if [[ "$line" =~ ^(([0-9a-f]{2}:){5}[0-9a-f]{2})[[:space:]]+(-?[0-9]+|\?)\ dBm[[:space:]]+[^[:space:]]+[[:space:]]*(.*)$ ]]; then
+        mac=${BASH_REMATCH[1]}; name=${BASH_REMATCH[4]}
+        # Keep an earlier answer if a later pass gets no response.
+        [[ -n "${row_of[$mac]+x}" && "$name" == "(no response)" ]] || row_of[$mac]=$line
+        case "$name" in
+          ''|'(no response)'|'(anonymous)') ;;
+          *)
+            [[ -n "${said[$mac]+x}" ]] || { said[$mac]=1; printf 'Heard from %s.\n' "$name"; }
+            [[ "${name,,}" == *"$want"* ]] && found=1 ;;
+        esac
+      else
+        other+=$line$'\n'
+      fi
+    done
+    if (( timed_out )); then
+      stop_group "$pid"
+      rc=1
+    else
+      wait "$pid"; rc=$?
+      # GNU timeout returns 124, or 137 when its grace ends in SIGKILL.
+      if (( SECONDS >= deadline && (rc == 124 || rc == 137) )); then timed_out=1; fi
+    fi
+    exec {fd}<&-
+    pid=
+    # A truncated pass cannot establish uniqueness, even if a match arrived.
+    if (( timed_out )); then
+      die "Name lookup did not finish within $NAME_WAIT seconds; nothing was sent. Open AirDrop on \"$shown\" and try again.
+${other}Answers so far:
+$(printf '  %s\n' "${row_of[@]}")"
+    fi
+    # Only exit 1 means an empty table; other failures need attention now.
+    (( rc == 0 || rc == 1 )) || die "${other%$'\n'}"
+    (( found )) && break
+    left=$(( deadline - SECONDS ))
+    (( left > 0 )) || break
+    if (( SECONDS >= note_at )); then
+      printf 'No "%s" yet (devices heard: %d, named: %d). Still looking, %ds left...\n' \
+        "$shown" "${#row_of[@]}" "${#said[@]}" "$left"
+      note_at=$(( SECONDS + 15 ))
+    fi
+    # A fast empty pass must not spin, or sleep past the remaining budget.
+    (( left > 3 )) && left=3
+    setsid sleep "$left" &
+    pid=$!
+    wait "$pid"
+    pid=
+  done
+  trap - TERM INT HUP
+  listing=$(printf '%s\n' "${row_of[@]}")
+  (( ${#row_of[@]} )) && rc=0 || rc=1
+}
+
 choose_peer() {
-  local want=${1,,} listing rc rows=() matches=() row lines= quoted by_name=0; shift
+  local want=${1,,} shown=$1 listing rc rows=() matches=() exact=() row lines= quoted by_name=0; shift
   # A colon, or a full 12-hex MAC, is an address. Anything else is a device
   # name -- and the test has to be that strict, because device names are often
   # pure hex ("f0011" is one here) and treating such a name as an address
@@ -1390,15 +1482,17 @@ choose_peer() {
   # receiving -- which is exactly the case here, since it has to be receiving
   # to accept the file anyway.
   if (( by_name )); then
-    listing=$("$SENDER" --list --names 2>&1); rc=$?
+    find_by_name "$want" "$shown"
   else
     listing=$("$SENDER" --list 2>&1); rc=$?
   fi
   (( rc == 0 || rc == 1 )) || die "$listing"
   mapfile -t rows < <(printf '%s\n' "$listing" \
     | sed -nE 's/^(([0-9a-f]{2}:){5}[0-9a-f]{2})[[:space:]]+(-?[0-9]+|\?) dBm[[:space:]]+[^[:space:]]+[[:space:]]*(.*)$/\1|\3|\4/p')
-  (( ${#rows[@]} )) \
-    || die "No nearby Apple device found. A window is what finds them, so open one first:  omdrop on 10m"
+  if (( ${#rows[@]} == 0 )); then
+    (( by_name )) && die "No Apple device was heard in $NAME_WAIT seconds. Open AirDrop on \"$shown\" so it can be heard, then try again."
+    die "No nearby Apple device found. A window is what finds them, so open one first:  omdrop on 10m"
+  fi
 
   for row in "${rows[@]}"; do
     local mac=${row%%|*} rest=${row#*|} name
@@ -1406,13 +1500,16 @@ choose_peer() {
     if [[ -z "$want" ]]; then matches+=("$row")
     elif (( by_name )); then
       [[ "$name" == *"$want"* && "$name" != "(no response)" && "$name" != "(anonymous)" ]] && matches+=("$row")
+      [[ "$name" == "$want" ]] && exact+=("$row")
     else
       [[ "$mac" == *"$want"* ]] && matches+=("$row")
     fi
   done
+  # Prefer an exact name, but still refuse two devices with that exact name.
+  (( ${#exact[@]} )) && matches=("${exact[@]}")
   if (( ${#matches[@]} == 0 )); then
     if (( by_name )); then
-      die "No device called \"$want\" is receiving right now. A device gives its name
+      die "No device called \"$shown\" answered in $NAME_WAIT seconds. A device gives its name
 only while it is ready to receive, so open AirDrop on it and try again. What answered:
 $(printf '%s\n' "$listing" | sed 's/^/  /')"
     fi

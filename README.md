@@ -86,6 +86,10 @@ omdrop send --verbose ~/photo.jpg # protocol log, for bug reports
 
 Before sending from the command line, open a receive window with `omdrop on 10m`; the window is what hears nearby devices. `omdrop send` accepts `http` and `https` links, including several links in one transfer. A `.webloc` or `.url` file containing a web link is sent as that link so the recipient can open it in a browser, rather than as a downloaded shortcut. Other shortcut files remain files. Send links and files separately. If the installed sender lacks link support, update it with `omdrop install-driver`.
 
+For a named recipient, `omdrop send` searches for up to two minutes and reports devices as they answer. Turn Omdrop on first with `omdrop on`. Names match without regard to case; an exact name takes priority over a substring match. If several devices match, including duplicate exact names, choose one with `--to ADDRESS`. An unfinished lookup sends nothing, even if a matching name has already answered.
+
+`OMDROP_NAME_WAIT` sets the discovery timeout in decimal seconds (1–2147483647, default 120). Leading zeros are allowed; invalid values use the default. Stopping lookup processes can take up to two additional seconds, including when a helper stops producing output but remains alive. Cancellation stops the lookup and its probes. `--wait` controls the separate receiver-wake wait after discovery, not the name search.
+
 In `omdrop peers -n` output, `(no response)` means nothing answered on the AirDrop port, and `(anonymous)` means the device answered but withheld its name. To look up names without the Bluetooth announcement, add `--no-wake`; only devices already listening will answer. AWDL addresses change every session.
 
 ## Contacts Only
