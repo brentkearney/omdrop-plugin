@@ -77,11 +77,14 @@ omdrop limit 30                   # largest transfer, as % of free disk space
 omdrop peers -n                   # nearby devices, with names
 omdrop send ~/photo.jpg MyMac     # by name, or --to part of an address
 omdrop send ~/a.jpg ~/b.pdf MyMac # several files, accepted once
+omdrop send "Studio Mac" https://omarchy.org/
 omdrop send --wait 120 ~/photo.jpg iPhone
 omdrop send --verbose ~/photo.jpg # protocol log, for bug reports
 ```
 
 `start`, `stop`, `list`, and `vis` are aliases for `on`, `off`, `peers`, and `visibility`. Run `omdrop help` for the rest.
+
+Before sending from the command line, open a receive window with `omdrop on 10m`; the window is what hears nearby devices. `omdrop send` accepts `http` and `https` links, including several links in one transfer. A `.webloc` or `.url` file containing a web link is sent as that link so the recipient can open it in a browser, rather than as a downloaded shortcut. Other shortcut files remain files. Send links and files separately. If the installed sender lacks link support, update it with `omdrop install-driver`.
 
 In `omdrop peers -n` output, `(no response)` means nothing answered on the AirDrop port, and `(anonymous)` means the device answered but withheld its name. To look up names without the Bluetooth announcement, add `--no-wake`; only devices already listening will answer. AWDL addresses change every session.
 
