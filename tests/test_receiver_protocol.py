@@ -7,12 +7,14 @@ sharingd does: chunked /Discover and /Ask bodies, then /Ask and a DVZip
 """
 
 import http.client
+import hashlib
 import json
 import os
 import plistlib
 import shutil
 import socket
 import ssl
+import struct
 import subprocess
 import sys
 import tempfile
@@ -245,6 +247,82 @@ class StalledHandshakeTests(ReceiverFixture):
         status, _ = self.post(self.connection(), "/Discover",
                               plistlib.dumps({}, fmt=plistlib.FMT_BINARY))
         self.assertEqual(status, 200)
+
+
+class InterruptedUploadTests(ReceiverFixture):
+    def reset_request(self, path, tid, framing, partial):
+        start = len(self.log.read_text())
+        conn = self.connection()
+        conn.connect()
+        conn.sock.sendall(
+            (f"POST {path} HTTP/1.1\r\nHost: localhost\r\n"
+             f"Content-Type: application/x-dvzip\r\n"
+             f"TransferID: {tid}\r\nExpect: 100-continue\r\n"
+             f"{framing}\r\n\r\n").encode())
+        response = conn.sock.makefile("rb")
+        self.assertEqual(response.readline(), b"HTTP/1.1 100 Continue\r\n")
+        self.assertEqual(response.readline(), b"\r\n")
+        response.close()
+        conn.sock.sendall(partial)
+        # A sender leaving AWDL can reset the connection between chunks.
+        # Give the receiver time to consume the preceding complete chunk.
+        time.sleep(0.1)
+        conn.sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                             struct.pack("ii", 1, 0))
+        conn.close()
+        deadline = time.monotonic() + 5
+        while True:
+            log = self.log.read_text()[start:]
+            if "storage failed" in log or "disconnected" in log:
+                break
+            self.assertLess(time.monotonic(), deadline, log)
+            time.sleep(0.02)
+        self.assertNotIn("storage failed", log)
+        self.assertNotIn('"POST /Upload HTTP/1.1" 507', log)
+        self.assertNotIn("Traceback", log)
+        self.assertIn(f"{path} peer disconnected:", log)
+        return log
+
+    def test_reset_during_upload_releases_slots_and_reports_network_progress(self):
+        # More resets than MAX_CONCURRENT_UPLOADS, followed by a successful
+        # upload, proves cancellation does not consume the receiver's slots.
+        before = sorted(self.out.iterdir())
+        for index in range(3):
+            tid = f"reset-test-{index}"
+            log = self.reset_request("/Upload", tid, "Transfer-Encoding: chunked",
+                                     b"4\r\ndata\r\n")
+            self.assertIn(f"upload {tid}:", log)
+            self.assertIn("9 HTTP body/framing bytes read", log)
+            self.assertEqual(sorted(self.out.iterdir()), before)
+        status, _ = self.post(self.connection(), "/Upload", dvzip([("after-reset.txt", b"ok")]),
+                              {"Content-Type": "application/x-dvzip"})
+        self.assertEqual(status, 200)
+        self.assertEqual((self.out / "after-reset.txt").read_bytes(), b"ok")
+
+    def test_reset_in_a_content_length_body_counts_partial_progress(self):
+        log = self.reset_request("/Upload", "reset-length", "Content-Length: 1000", b"data")
+        self.assertIn("4 HTTP body/framing bytes read", log)
+
+    def test_discover_and_ask_can_be_retried_after_a_reset(self):
+        for path in ("/Discover", "/Ask"):
+            with self.subTest(path=path):
+                self.reset_request(path, "reset-metadata", "Transfer-Encoding: chunked",
+                                   b"4\r\ndata\r\n")
+                status, _ = self.post(self.connection(), path,
+                                      plistlib.dumps({}, fmt=plistlib.FMT_BINARY))
+                self.assertEqual(status, 200)
+
+    def test_repeated_small_and_larger_uploads_preserve_file_integrity(self):
+        conn = self.connection()
+        for index, size in enumerate((12, 4 * 1024 * 1024, 12)):
+            data = os.urandom(size)
+            name = f"repeat-{index}.bin"
+            status, _ = self.post(conn, "/Upload", dvzip([(name, data)]),
+                                  {"Content-Type": "application/x-dvzip"})
+            self.assertEqual(status, 200)
+            saved = (self.out / name).read_bytes()
+            self.assertEqual(len(saved), size)
+            self.assertEqual(hashlib.sha256(saved).digest(), hashlib.sha256(data).digest())
 
 
 if __name__ == "__main__":
