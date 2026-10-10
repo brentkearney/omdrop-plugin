@@ -167,14 +167,17 @@ omdrop -- send and receive files with nearby Apple devices
                     off; --force stops anyway
   toggle            off if receiving, on if not
   status [--json]   receiving or not, time left, the name Macs see
-  send FILE...      send files to a nearby Apple device, as one transfer
-                    it accepts once. Turn a window on first (omdrop on):
-                    that is what hears the devices around you. --to ADDRESS
-                    chooses one when several are heard, and --wait SECONDS
-                    keeps trying for that long while an iPhone's receiver
-                    is asleep (default 30), announcing this machine over
-                    Bluetooth to wake it. --pick asks for the files in a
-                    chooser instead.
+  send [NAME] FILE...|URL...
+                    send files to a nearby Apple device, as one transfer
+                    it accepts once, or send http/https links. A .webloc or
+                    .url file holding a web link goes as that link.
+                    Send links and files separately. Turn a window on first
+                    (omdrop on): that is what hears the devices around you.
+                    NAME chooses a device by name; --to ADDRESS chooses
+                    by part of its address. --wait SECONDS keeps trying
+                    while an iPhone's receiver is asleep (default 30),
+                    announcing this machine over Bluetooth to wake it.
+                    --pick asks for the files in a chooser instead.
   peers [-n]        the Apple devices nearby right now. -n also asks
                     each one for its name, which means connecting to it and
                     showing this machine to every device listed, and briefly
@@ -219,6 +222,7 @@ Examples:
   omdrop on 10m
   omdrop on forever
   omdrop send ~/photo.jpg
+  omdrop send "Studio Mac" https://omarchy.org/
   omdrop name "Brent's Omarchy"
   omdrop limit 30
 EOF
@@ -1352,6 +1356,9 @@ narrate_send() {
       *"UPLOAD "*" -> ok ("*)
         rest=${line#*UPLOAD }; name=${rest%% -> ok *}; stat=${line##*-> ok (}
         printf 'Sent %s (%s)\n' "$name" "${stat%)}" ;;
+      # A link is delivered by the accepted Ask: there is no upload.
+      *"LINK "*" -> ok"*)
+        rest=${line#*LINK }; printf 'Sent %s\n' "${rest% -> ok}" ;;
     esac
   done
 }
@@ -1429,7 +1436,7 @@ $(printf '%s\n' "$listing" | sed 's/^/  /')"
 }
 
 cmd_send() {
-  local to= wait=$DEFAULT_SEND_WAIT verbose=0 pick=0 rc f; local -a rest=() files=()
+  local to= wait=$DEFAULT_SEND_WAIT verbose=0 pick=0 rc f url; local -a rest=() files=() urls=()
   while (( $# )); do
     case "$1" in
       --to)     shift; (( $# )) || die "send --to: the address of a device, as listed by: omdrop peers"; to=$1 ;;
@@ -1454,22 +1461,20 @@ cmd_send() {
     shift
   done
   rest+=("$@")
-  # With --to, every positional is a file, and one that does not exist is a
-  # typo to report as such. Without it, the one name that is not a file is the
-  # recipient; two such names leave no way to tell a recipient from a typo.
-  if [[ -n "$to" ]]; then
-    files=("${rest[@]}")
-  else
-    local -a absent=()
-    for f in "${rest[@]}"; do
-      if [[ -e "$f" ]]; then files+=("$f"); else absent+=("$f"); fi
-    done
-    case ${#absent[@]} in
-      0) ;;
-      1) to=${absent[0]} ;;
-      *) die "send: none of these is a file, and only one can be the recipient: ${absent[*]}" ;;
-    esac
-  fi
+  # Web links are payloads, not recipients. With --to, every other argument
+  # is a file. Without it, one nonexistent path can name the recipient.
+  local -a absent=()
+  for f in "${rest[@]}"; do
+    if web_url "$f"; then urls+=("$f")
+    elif [[ -n "$to" || -e "$f" ]]; then files+=("$f")
+    else absent+=("$f")
+    fi
+  done
+  case ${#absent[@]} in
+    0) ;;
+    1) to=${absent[0]} ;;
+    *) die "send: none of these is a file, and only one can be the recipient: ${absent[*]}" ;;
+  esac
 
   if (( pick )); then
     (( ${#rest[@]} == 0 )) || die "send --pick: the chooser picks the files, so name only the recipient, with --to"
@@ -1492,8 +1497,25 @@ cmd_send() {
     printf 'Preparing %s...\n' "$(describe_files "${files[@]}")"
   fi
 
-  (( ${#files[@]} )) || die "usage: omdrop send [RECIPIENT] FILE... [--wait SECONDS]
-  RECIPIENT is a device name, as shown by \`omdrop peers -n\`, or part of an address."
+  # Send a shortcut's web link rather than upload the shortcut as a file.
+  # Invalid shortcuts and non-web links remain ordinary files.
+  local -a kept=() link_notes=()
+  for f in "${files[@]}"; do
+    if is_link_file "$f" && url=$(link_target "$f"); then
+      urls+=("$url")
+      link_notes+=("Sending the link in ${f##*/}, so it opens in their browser: $url")
+    else
+      kept+=("$f")
+    fi
+  done
+  files=("${kept[@]}")
+  (( ${#urls[@]} == 0 || ${#files[@]} == 0 )) \
+    || die "Send links and files separately: one transfer carries one or the other."
+  (( ${#link_notes[@]} == 0 )) || printf '%s\n' "${link_notes[@]}"
+
+  (( ${#files[@]} + ${#urls[@]} )) || die "usage: omdrop send [RECIPIENT] FILE...|URL... [--wait SECONDS]
+  RECIPIENT is a device name, as shown by \`omdrop peers -n\`, or part of an address.
+  A URL is an http or https link, which opens in the recipient's browser."
   local -a names=()
   local n
   for f in "${files[@]}"; do
@@ -1531,13 +1553,18 @@ cmd_send() {
   if (( ${#files[@]} > 1 )) && ! sender_takes_several_files; then
     die "Sending several files at once needs a newer Wi-Fi driver package. Update it with: omdrop install-driver"
   fi
+  if (( ${#urls[@]} )) && ! "$SENDER" --help 2>&1 | grep -q -- '--url'; then
+    die "Sending a link needs a newer Wi-Fi driver package. Update it with: omdrop install-driver"
+  fi
 
-  choose_peer "$to" "${files[@]}"
+  choose_peer "$to" "${urls[@]}" "${files[@]}"
 
   # The name Apple devices already know this computer by. The prompt on their
   # screen should say the same thing whichever way the file is going, and the
   # sender's own default ("Omarchy") is nobody's machine in particular.
-  local cmd=("$SENDER" --name "$(effective_name)" --wait "$wait" --mac "$PEER" -- "${files[@]}")
+  local -a link_args=()
+  for url in "${urls[@]}"; do link_args+=(--url "$url"); done
+  local cmd=("$SENDER" --name "$(effective_name)" --wait "$wait" --mac "$PEER" "${link_args[@]}" -- "${files[@]}")
 
   # Until this process exits, `omdrop off` knows a transfer is running.
   mark_sending "${to:-$PEER}" || true

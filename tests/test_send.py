@@ -1,5 +1,6 @@
 import json
 import os
+import plistlib
 import subprocess
 import tempfile
 import time
@@ -111,6 +112,143 @@ echo "    inet6 fe80::1c9a:4bff:fe33:1/64 scope link"
 
     def sender_args(self):
         return self.capture.read_text().splitlines()
+
+
+class SendLinkTests(SenderFixture):
+    def setUp(self):
+        super().setUp()
+        self.env["SENDER_USAGE"] = "  -n, --names  --url URL  [file ...]"
+        self.env["SENDER_STDOUT"] = (
+            "2026-10-09 12:00:00,000 INFO send: +  1.21s ASK -> accepted (0.13s)\n"
+            "2026-10-09 12:00:00,000 INFO send: +  1.21s LINK https://example.com/ -> ok"
+        )
+
+    def test_web_addresses_are_passed_unchanged_as_repeated_url_options(self):
+        urls = ["http://example.com/", "HTTPS://example.com/a?q=1&b=2#section"]
+
+        result = self.run_omdrop("send", "--to", "6c:58", *urls)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = self.sender_args()
+        self.assertEqual(args[args.index("--url"):], ["--url", urls[0], "--url", urls[1], "--"])
+        self.assertEqual(args[args.index("--mac") + 1], "e2:9d:03:6c:58:23")
+
+    def test_a_recipient_can_come_before_or_after_a_link(self):
+        self.env["PEER_LIST"] = f"{ONE_PEER}  Studio Mac"
+        url = "https://example.com/"
+        for payload in [("Studio Mac", url), (url, "Studio Mac")]:
+            with self.subTest(payload=payload):
+                result = self.run_omdrop("send", *payload)
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                args = self.sender_args()
+                self.assertEqual(args[args.index("--url") + 1], url)
+                self.assertEqual(args[args.index("--mac") + 1], "e2:9d:03:6c:58:23")
+
+    def test_shortcuts_go_as_the_web_link_inside_them(self):
+        url = "https://example.com/a.dmg"
+        shortcuts = {
+            "download.webloc": plistlib.dumps({"URL": url}),
+            "binary.WEBLOC": plistlib.dumps({"URL": url}, fmt=plistlib.FMT_BINARY),
+            "download.URL": f"[InternetShortcut]\r\nURL={url}\r\n".encode(),
+        }
+        for name, content in shortcuts.items():
+            with self.subTest(name=name):
+                shortcut = Path(self.tmp.name) / name
+                shortcut.write_bytes(content)
+
+                result = self.run_omdrop("send", str(shortcut))
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                args = self.sender_args()
+                self.assertEqual(args[args.index("--url") + 1], url)
+                self.assertEqual(args[args.index("--") + 1:], [])
+                self.assertIn(f"Sending the link in {name}", result.stdout)
+
+    def test_non_web_and_invalid_shortcuts_remain_files(self):
+        shortcuts = {
+            "share.webloc": plistlib.dumps({"URL": "smb://fileserver/share"}),
+            "invalid.webloc": b"not a property list",
+            "invalid.url": b"[OtherSection]\nURL=https://example.com/\n",
+        }
+        for name, content in shortcuts.items():
+            with self.subTest(name=name):
+                shortcut = Path(self.tmp.name) / name
+                shortcut.write_bytes(content)
+
+                result = self.run_omdrop("send", str(shortcut))
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                args = self.sender_args()
+                self.assertNotIn("--url", args)
+                self.assertEqual(args[args.index("--") + 1:], [str(shortcut)])
+
+    def test_links_and_files_are_refused_before_discovery(self):
+        shortcut = Path(self.tmp.name) / "page.url"
+        shortcut.write_text("[InternetShortcut]\nURL=https://example.com/\n")
+        for link in ["https://example.com/", str(shortcut)]:
+            with self.subTest(link=link):
+                result = self.run_omdrop("send", str(self.file), link)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("separately", result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertFalse(self.capture_list.exists())
+                self.assertFalse(self.capture.exists())
+
+    def test_a_driver_without_links_is_told_to_update_before_discovery(self):
+        self.env["SENDER_USAGE"] = "  -n, --names  [file ...]"
+
+        result = self.run_omdrop("send", "https://example.com/")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("omdrop install-driver", result.stderr)
+        self.assertFalse(self.capture_list.exists())
+        self.assertFalse(self.capture.exists())
+        file_result = self.run_omdrop("send", str(self.file))
+        self.assertEqual(file_result.returncode, 0, file_result.stderr)
+
+    def test_a_delivered_link_is_reported_without_the_protocol_log(self):
+        result = self.run_omdrop("send", "https://example.com/")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Sent https://example.com/", result.stdout)
+        self.assertNotIn("INFO send", result.stdout)
+
+    def test_a_declined_link_preserves_the_sender_exit_status(self):
+        self.env["SENDER_STDOUT"] = DECLINED
+        self.env["SENDER_RC"] = "3"
+
+        result = self.run_omdrop("send", "https://example.com/")
+
+        self.assertEqual(result.returncode, 3)
+        self.assertIn("declined", result.stderr)
+        self.assertNotIn("Sent ", result.stdout)
+
+    def test_verbose_link_sending_preserves_the_protocol_log(self):
+        result = self.run_omdrop("send", "--verbose", "https://example.com/")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(self.env["SENDER_STDOUT"], result.stdout)
+
+    def test_a_link_still_requires_the_radio_to_be_running(self):
+        self.env["RADIO"] = "down"
+
+        result = self.run_omdrop("send", "--to", "6c:58", "https://example.com/")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("omdrop on", result.stderr)
+        self.assertFalse(self.capture_list.exists())
+        self.assertFalse(self.capture.exists())
+
+    def test_ambiguous_peer_suggestions_include_the_link(self):
+        self.env["PEER_LIST"] = THREE_PEERS
+
+        result = self.run_omdrop("send", "https://example.com/")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("omdrop send --to fe:63:e6:68:9f:12 https://example.com/", result.stderr)
+        self.assertFalse(self.capture.exists())
 
 
 class SendCommandTests(SenderFixture):
