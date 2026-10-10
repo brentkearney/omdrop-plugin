@@ -8,6 +8,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 OMDROP = ROOT / "bin" / "omdrop"
 
+def apple_wifi_sysfs(root):
+    """A sysfs tree holding one Broadcom (0x14e4) network controller, which is
+    what install-driver checks for before doing anything. These tests are about
+    the script it writes, not the machine they run on."""
+    dev = Path(root) / "sys" / "bus" / "pci" / "devices" / "0000:01:00.0"
+    dev.mkdir(parents=True)
+    (dev / "vendor").write_text("0x14e4\n")
+    (dev / "class").write_text("0x028000\n")
+    return str(Path(root) / "sys")
+
 
 class FirewallCommandTests(unittest.TestCase):
     def setUp(self):
@@ -21,6 +31,7 @@ class FirewallCommandTests(unittest.TestCase):
             PATH=f"{self.bin}:{self.env['PATH']}",
             CAPTURE=str(self.capture),
             OMDROP_DISCOVERABLE="/bin/sh",
+            OMDROP_SYSFS=apple_wifi_sysfs(self.tmp.name),
         )
         self.command(
             "systemctl",

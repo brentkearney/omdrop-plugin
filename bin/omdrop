@@ -555,6 +555,15 @@ cmd_identity() {
 # a self-signed pair under the Apple identity's names.
 driver_identity_ready() {
   local installed
+  if radio_probe; then
+    radio_probe_hung && die "$(radio_probe_hung_say)"
+    # A backend states which omdrop-awdl helper contract it follows.
+    installed=$(probe_field contract)
+    if [[ -z "$installed" ]] || (( $(vercmp "$installed" "$DRIVER_IDENTITY_VERSION") < 0 )); then
+      die "Keeping the identity in 1Password needs a radio backend that follows contract $DRIVER_IDENTITY_VERSION or newer ($(probe_field backend) follows ${installed:-none})."
+    fi
+    return 0
+  fi
   installed=$(pacman -Q "$DRIVER_PKG" 2>/dev/null) || installed=
   installed=${installed##* }
   if [[ -z "$installed" ]] || (( $(vercmp "$installed" "$DRIVER_IDENTITY_VERSION") < 0 )); then
@@ -708,16 +717,146 @@ cmd_setup() {
 # building a kernel module there only fails.
 apple_broadcom_wifi() {
   local d
-  for d in /sys/bus/pci/devices/*; do
+  # OMDROP_SYSFS lets the tests describe the hardware instead of depending on
+  # the machine they run on.
+  for d in "${OMDROP_SYSFS:-/sys}"/bus/pci/devices/*; do
     [[ "$(cat "$d/vendor" 2>/dev/null)" == 0x14e4 && "$(cat "$d/class" 2>/dev/null)" == 0x0280* ]] && return 0
   done
   return 1
 }
 
+# The radio half is a separate package: omdrop-awdl for Apple's Broadcom Wi-Fi,
+# or another radio backend. A backend may describe itself through
+# `omdrop-discoverable probe --json`, run unprivileged (docs/radio-backend.md).
+# One that does owns the hardware and installation checks for its own radio;
+# one that does not is taken to be omdrop-awdl on Apple's Broadcom Wi-Fi and
+# gets the checks below, unchanged. omdrop-awdl answers a subcommand it does
+# not know with its usage and exit 2, which is how it reads as "no probe".
+
+# The probe reads a few files and answers. One that hangs would hang doctor
+# with it, and the panel waiting on doctor, so it gets this long. timeout puts
+# the helper in a process group of its own and signals all of it, so a child
+# still holding stdout open cannot keep the command substitution waiting.
+# OMDROP_PROBE_TIMEOUT lets the tests wait less.
+PROBE_TIMEOUT=${OMDROP_PROBE_TIMEOUT:-5}
+# The oldest omdrop-awdl helper contract this plugin works with, for every
+# backend that probes. 0.7.0 is the first whose sender, send-to-peer and
+# advertiser follow docs/identity-contract.md. Features newer than this are
+# found by asking the sender (`--help`), not by version.
+BACKEND_CONTRACT_MIN=0.7.0
+# Item IDs the plugin reports itself, and the panel acts on. A backend's own
+# item under one of these names is passed on as backend-<id>, so its sentence
+# still shows but no button offers a fix that cannot fix it.
+PLUGIN_ITEM_IDS="driver library service"
+
+# RADIO_PROBE: empty until asked, then `none` (omdrop-awdl), `hung` (a helper
+# that did not answer in time) or the probe's JSON. A hung helper still counts
+# as a backend that probes: omdrop-awdl answers an unknown command at once, so
+# falling back to its Broadcom checks would only tell a non-Mac it is not one.
+RADIO_PROBE=
+radio_probe() {
+  if [[ -z "$RADIO_PROBE" ]]; then
+    RADIO_PROBE=none
+    local out rc=0
+    if [[ -x "$DISCOVERABLE" ]]; then
+      out=$(timeout -k 1 "$PROBE_TIMEOUT" "$DISCOVERABLE" probe --json 2>/dev/null) || rc=$?
+      if (( rc == 124 || rc == 137 )); then
+        RADIO_PROBE=hung
+      elif (( rc == 0 )) && printf '%s' "$out" | python3 -c '
+import json, sys
+p = json.load(sys.stdin)
+assert isinstance(p, dict) and isinstance(p.get("backend"), str) and p["backend"].strip()' 2>/dev/null; then
+        RADIO_PROBE=$out
+      fi
+    fi
+  fi
+  [[ "$RADIO_PROBE" != none ]]
+}
+
+radio_probe_hung() {
+  radio_probe && [[ "$RADIO_PROBE" == hung ]]
+}
+
+radio_probe_hung_say() {
+  printf '%s' "The radio backend did not answer when asked what it needs ($DISCOVERABLE probe, $PROBE_TIMEOUT seconds). Reinstalling or updating its package may help."
+}
+
+# One field of the probe as text: strings as they are, booleans as true/false,
+# anything absent as nothing.
+probe_field() {
+  [[ "$RADIO_PROBE" == "{"* ]] || return 0
+  PROBE="$RADIO_PROBE" python3 -c '
+import json, os, sys
+v = json.loads(os.environ["PROBE"]).get(sys.argv[1])
+print("" if v is None else str(v).lower() if isinstance(v, bool) else v)' "$1"
+}
+
+# The backend's blockers, in its order, as prereqs_missing lines.
+probe_missing() {
+  [[ "$RADIO_PROBE" == "{"* ]] || return 0
+  PROBE="$RADIO_PROBE" RESERVED="$PLUGIN_ITEM_IDS" python3 -c '
+import json, os
+reserved = os.environ["RESERVED"].split()
+for m in json.loads(os.environ["PROBE"]).get("missing") or []:
+    if isinstance(m, dict) and m.get("id") and m.get("say"):
+        i = str(m["id"])
+        print("%s\t%s" % ("backend-" + i if i in reserved else i, " ".join(str(m["say"]).split())))'
+}
+
+# Whether the backend follows at least the plugin's minimum contract. One
+# that names none is taken to follow none.
+backend_contract_ok() {
+  local contract
+  contract=$(probe_field contract)
+  [[ -n "$contract" ]] && (( $(vercmp "$contract" "$BACKEND_CONTRACT_MIN") >= 0 ))
+}
+
+backend_contract_say() {
+  local contract
+  contract=$(probe_field contract)
+  printf '%s' "The installed radio backend ($(probe_field backend)) follows helper contract ${contract:-none}, older than the $BACKEND_CONTRACT_MIN this version of Omdrop needs. Update its package."
+}
+
+# For messages that ask for a newer or missing radio helper: what provides
+# it, and how to update it. `omdrop install-driver` builds omdrop-awdl; a
+# backend that probes is a package of its own, which that command leaves alone.
+radio_pkg() {
+  if radio_probe; then echo "radio backend"; else echo "Wi-Fi driver package"; fi
+}
+radio_update() {
+  if radio_probe; then
+    local backend
+    backend=$(probe_field backend)
+    echo "Update the package that provides it${backend:+ ($backend)}: omdrop install-driver leaves it alone."
+  else
+    echo "Update it with: omdrop install-driver"
+  fi
+}
+
 prereqs_missing() {
+  if radio_probe; then
+    # A backend that does not answer is alone too: install-driver refuses to
+    # run for it, so a library item would offer the panel's button for nothing.
+    if radio_probe_hung; then
+      printf 'backend\t%s\n' "$(radio_probe_hung_say)"
+      return 0
+    fi
+    # Hardware the backend cannot drive is, again, first and alone.
+    if [[ "$(probe_field hardware)" == false ]]; then
+      probe_missing | grep $'^hardware\t' \
+        || printf 'hardware\t%s\n' "This computer's Wi-Fi is not one the installed radio backend ($(probe_field backend)) can drive."
+      return 0
+    fi
+    backend_contract_ok || printf 'backend\t%s\n' "$(backend_contract_say)"
+    probe_missing
+    receiver_libs_installed \
+      || printf 'library\t%s\n' "Packages the receiver needs ($RECEIVER_PKGS) are not installed. The button below installs them."
+    have_unit || printf 'service\t%s\n' "The service that receives files is not installed yet. Turning Omdrop on installs it."
+    return 0
+  fi
   # First, and alone: nothing else on this list can be fixed on this machine.
   if ! apple_broadcom_wifi; then
-    printf 'hardware\t%s\n' "This computer has no Apple Broadcom Wi-Fi, which AirDrop needs. Omdrop runs only on Apple Silicon Macs, not in a virtual machine."
+    printf 'hardware\t%s\n' "This computer has no Apple Broadcom Wi-Fi, which Omdrop's own driver needs: it runs only on Apple Silicon Macs, not in a virtual machine. Other Wi-Fi cards need a different radio backend (docs/radio-backend.md)."
     return 0
   fi
   receiver_libs_installed \
@@ -833,6 +972,10 @@ DRIVER_IDENTITY_VERSION=0.7.0
 cmd_install_driver() {
   local self_q
   printf -v self_q '%q' "$0"
+  if radio_probe; then
+    install_for_backend
+    return
+  fi
   if [[ -x "$DISCOVERABLE" ]] && driver_current && receiver_libs_installed; then
     echo "The driver and the Python library the receiver needs are both installed and current. Nothing to do."
     return 0
@@ -915,10 +1058,47 @@ $self_q firewall install"
   # Tested on its own line, not with `||`: bash ignores `set -e` inside a
   # subshell whose status a `||` is testing, so every step would run on
   # regardless of the ones before it failing.
+  launch_install "$build" "Omdrop requires a patched wifi driver, which requires administrative privilege to install. You will be prompted for your password."
+}
+
+# With a radio backend that probes, the radio is that package's business: it
+# is installed (it answered), and it reports its own blockers through doctor.
+# What remains is this plugin's own part, the receiver's packages and its
+# firewall rule, run the same way as the driver install.
+install_for_backend() {
+  local build="set -e"
+  # Without an answer there is no telling whether this backend is one the
+  # plugin can work with, so nothing is installed for it.
+  radio_probe_hung && die "$(radio_probe_hung_say)"
+  # The plugin's part is still worth installing; the backend's update is not
+  # something this command can do.
+  backend_contract_ok || echo "$(backend_contract_say)" >&2
+  receiver_libs_installed || build="$build
+sudo pacman -S --needed --asdeps $RECEIVER_PKGS"
+  ufw_active && build="$build
+$self_q firewall install"
+  if [[ "$build" == "set -e" ]]; then
+    echo "The receiver's packages are installed and the radio comes from $(probe_field backend) $(probe_field version). Nothing to do."
+    return 0
+  fi
+  if ! command -v omarchy-launch-floating-terminal-with-presentation >/dev/null 2>&1; then
+    echo "Install what the receiver needs with:"
+    printf '\n%s\n\n' "$build"
+    return 0
+  fi
+  echo "Opening a terminal to install what the receiver needs."
+  launch_install "$build" "Omdrop needs a few packages for its receiver, which requires administrative privilege to install. You will be prompted for your password."
+}
+
+# Run an install script in a floating terminal the user watches. A subshell,
+# so a failed step ends the script and not the terminal: with `set -e` at the
+# launcher's top level, the first failure closed the window before anyone
+# could read it. Exit 130 skips the launcher's "Done!".
+launch_install() {
+  local build=$1 intro=$2
   local script="( $build
 ); rc=\$?; if [ \$rc -ne 0 ]; then echo; echo \"Installing failed (exit \$rc). The messages above say why.\"; read -rsn 1 -p 'Press any key to close...' </dev/tty; echo; exit 130; fi"
-  omarchy-launch-floating-terminal-with-presentation \
-    "echo 'Omdrop requires a patched wifi driver, which requires administrative privilege to install. You will be prompted for your password.'; echo; $script"
+  omarchy-launch-floating-terminal-with-presentation "echo '$intro'; echo; $script"
 }
 
 cmd_on() {
@@ -1320,7 +1500,7 @@ print(json.dumps({
 # one waits forever. It drives airdrop-send.py over that endpoint.
 require_sender() {
   [[ -x "$SENDER" ]] \
-    || die "The program that sends files is not installed. It comes with the Wi-Fi driver: omdrop install-driver"
+    || die "The program that sends files is not installed. It comes with the $(radio_pkg). $(radio_update)"
   awdl_link_local \
     || die "The Apple-compatible radio is not running, so nobody can be heard and nothing can be sent. Start it with: omdrop on 10m"
 }
@@ -1664,14 +1844,14 @@ cmd_send() {
     [[ "$to" != *$'\n'* ]] || die "send: a recipient is one name or address, not several lines"
   fi
   [[ -x "$SENDER" ]] \
-    || die "The program that sends files is not installed. It comes with the Wi-Fi driver: omdrop install-driver"
+    || die "The program that sends files is not installed. It comes with the $(radio_pkg). $(radio_update)"
   # The driver package owns the sender, and a driver older than this plugin
   # takes one file only. Say so, rather than surface its argparse error.
   if (( ${#files[@]} > 1 )) && ! sender_takes_several_files; then
-    die "Sending several files at once needs a newer Wi-Fi driver package. Update it with: omdrop install-driver"
+    die "Sending several files at once needs a newer $(radio_pkg). $(radio_update)"
   fi
   if (( ${#urls[@]} )) && ! "$SENDER" --help 2>&1 | grep -q -- '--url'; then
-    die "Sending a link needs a newer Wi-Fi driver package. Update it with: omdrop install-driver"
+    die "Sending a link needs a newer $(radio_pkg). $(radio_update)"
   fi
 
   # A closed window hears nobody, so a send to a named device opens one, as
@@ -1873,7 +2053,7 @@ cmd_peers() {
   # tool that has never heard of it and surface raw argparse output. Say what
   # is actually wrong instead.
   if (( ${#names[@]} )) && ! "$SENDER" --help 2>&1 | grep -q -- '--names'; then
-    die "Looking up peer names needs a newer Wi-Fi driver package. Update it with: omdrop install-driver"
+    die "Looking up peer names needs a newer $(radio_pkg). $(radio_update)"
   fi
   # --stream: one JSON object per peer on its own line, written the moment
   # that peer answers, so the panel shows a name seconds after it arrives
