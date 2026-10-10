@@ -671,6 +671,19 @@ class Handler(BaseHTTPRequestHandler):
             return True
         return super().handle_expect_100()
 
+    def handle_one_request(self):
+        try:
+            super().handle_one_request()
+        except (ConnectionError, ssl.SSLError) as e:
+            # A peer can leave during metadata reads or while we answer it.
+            # The connection is no longer usable; do not try another reply.
+            self.peer_disconnected(str(e))
+
+    def peer_disconnected(self, reason):
+        self.close_connection = True
+        logging.info('%s peer disconnected: %s',
+                     getattr(self, 'path', 'request'), reason)
+
     def reject(self, status, reason):
         logging.warning('%s rejected: %s', self.path, reason)
         self.send_response(status)
@@ -890,6 +903,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         except RequestBodyError as e:
             self.reject(e.status, str(e))
+            return
+        except (ConnectionError, ssl.SSLError) as e:
+            # Socket errors are OSErrors too. They do not mean storage failed,
+            # and replying 507 on the dead socket just raises BrokenPipeError.
+            # The temporary file and upload slot are released by with/finally.
+            self.peer_disconnected(
+                f'upload {tid}: {e}; {deadline.transferred} HTTP body/framing '
+                f'bytes read in {time.monotonic() - deadline.started:.1f} s')
             return
         except OSError as e:
             self.reject(507, f'storage failed: {e}')
