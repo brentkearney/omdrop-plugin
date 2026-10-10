@@ -263,7 +263,10 @@ class Keyring:
         lib.keyctl_search.restype = ctypes.c_long
         lib.keyctl_search.argtypes = [ctypes.c_int32, ctypes.c_char_p, ctypes.c_char_p,
                                       ctypes.c_int32]
-        lib.keyctl_read_alloc.restype = ctypes.c_long
+        # int, not long: keyutils.h declares it so. Read as a long, its -1
+        # arrives as 4294967295 on aarch64, passes the n < 0 check, and
+        # string_at(NULL, 4 GiB) kills the process.
+        lib.keyctl_read_alloc.restype = ctypes.c_int
         lib.keyctl_read_alloc.argtypes = [ctypes.c_int32, ctypes.POINTER(ctypes.c_void_p)]
         for name in ('keyctl_set_timeout', 'keyctl_setperm', 'keyctl_link', 'keyctl_unlink',
                      'keyctl_revoke'):
