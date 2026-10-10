@@ -49,8 +49,8 @@ with its usage and exit 2) gets those checks, unchanged.
 ```
 
 It must answer within 5 seconds. A helper that doesn't is reported as a
-`backend` item ("The radio backend did not answer…"), not taken for
-omdrop-awdl, and `omdrop install-driver` refuses to run.
+`backend` item ("The radio backend did not answer…") and nothing else, not
+taken for omdrop-awdl, and `omdrop install-driver` refuses to run.
 
 - `backend` (required), `version`: shown to people, for example by
   `omdrop install-driver` and in messages that ask for a newer backend. An
@@ -73,7 +73,7 @@ omdrop-awdl, and `omdrop install-driver` refuses to run.
 them: it offers its install button for `driver` and `library`, and that button
 runs `omdrop install-driver`, which can't fix anything of a backend's. A
 backend's item under one of these IDs is shown as `backend-<id>`, without the
-button. Use your own IDs instead, such as `radio` or `backend`.
+button. Use your own IDs instead, such as `radio`.
 
 The plugin adds its own items after the backend's: `library` (the receiver's
 packages) and `service` (the receiving service). It reports `backend` itself

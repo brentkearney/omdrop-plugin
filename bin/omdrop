@@ -835,18 +835,20 @@ radio_update() {
 
 prereqs_missing() {
   if radio_probe; then
+    # A backend that does not answer is alone too: install-driver refuses to
+    # run for it, so a library item would offer the panel's button for nothing.
     if radio_probe_hung; then
       printf 'backend\t%s\n' "$(radio_probe_hung_say)"
-    else
-      # Hardware the backend cannot drive is, again, first and alone.
-      if [[ "$(probe_field hardware)" == false ]]; then
-        probe_missing | grep $'^hardware\t' \
-          || printf 'hardware\t%s\n' "This computer's Wi-Fi is not one the installed radio backend ($(probe_field backend)) can drive."
-        return 0
-      fi
-      backend_contract_ok || printf 'backend\t%s\n' "$(backend_contract_say)"
-      probe_missing
+      return 0
     fi
+    # Hardware the backend cannot drive is, again, first and alone.
+    if [[ "$(probe_field hardware)" == false ]]; then
+      probe_missing | grep $'^hardware\t' \
+        || printf 'hardware\t%s\n' "This computer's Wi-Fi is not one the installed radio backend ($(probe_field backend)) can drive."
+      return 0
+    fi
+    backend_contract_ok || printf 'backend\t%s\n' "$(backend_contract_say)"
+    probe_missing
     receiver_libs_installed \
       || printf 'library\t%s\n' "Packages the receiver needs ($RECEIVER_PKGS) are not installed. The button below installs them."
     have_unit || printf 'service\t%s\n' "The service that receives files is not installed yet. Turning Omdrop on installs it."

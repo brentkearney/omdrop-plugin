@@ -139,6 +139,15 @@ class RadioBackendTests(unittest.TestCase):
         self.assertIn("did not answer", missing[0]["say"])
         self.assertNotIn(BROADCOM_SAYS, json.dumps(missing))
 
+    def test_a_probe_that_hangs_offers_no_install_button(self):
+        # install-driver refuses for a backend that does not answer, so the
+        # library item, which brings up the panel's button, stays out.
+        self.command("omdrop-discoverable",
+                     '#!/bin/sh\n[ "$1" = probe ] || exit 2\nsleep 30\n')
+        self.env["OMDROP_PROBE_TIMEOUT"] = "1"
+        self.without_receiver_library()
+        self.assertEqual([m["id"] for m in self.doctor()["missing"]], ["backend"])
+
     def test_install_refuses_when_the_probe_hangs(self):
         self.command("omdrop-discoverable",
                      '#!/bin/sh\n[ "$1" = probe ] || exit 2\nsleep 30\n')
