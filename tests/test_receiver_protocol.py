@@ -6,6 +6,7 @@ sharingd does: chunked /Discover and /Ask bodies, then /Ask and a DVZip
 /Upload on one kept-alive connection.
 """
 
+import gzip
 import http.client
 import json
 import os
@@ -58,14 +59,19 @@ def der(pem_path):
     return ssl.PEM_cert_to_DER_cert(Path(pem_path).read_text())
 
 
-def dvzip(files):
-    """An odc CPIO archive in one zlib-compressed DVZip block, as macOS sends."""
+def cpio(files):
+    """An odc CPIO archive of in-memory files."""
     with tempfile.TemporaryDirectory() as work:
         path = Path(work) / "payload.cpio"
         with libarchive.file_writer(str(path), "cpio") as archive:
             for name, data in files:
                 archive.add_file_from_memory(f"./{name}", len(data), data)
-        block = zlib.compress(path.read_bytes())
+        return path.read_bytes()
+
+
+def dvzip(files):
+    """An odc CPIO archive in one zlib-compressed DVZip block, as macOS sends."""
+    block = zlib.compress(cpio(files))
     return len(block).to_bytes(4, "big") + block
 
 
@@ -192,6 +198,31 @@ class ExistingIdentityTests(ReceiverFixture):
                                "Expect": "100-continue"})
         self.assertEqual(status, 200)
         self.assertEqual((self.out / "hello.txt").read_bytes(), b"hello world\n")
+
+    def test_an_x_cpio_upload_from_older_ios_is_stored(self):
+        # iOS 16 labels the same compressed CPIO archive application/x-cpio;
+        # a 415 made the iPhone report every transfer as failed.
+        for framing, encode in (("dvzip", dvzip),
+                                ("gzip", lambda files: gzip.compress(cpio(files)))):
+            with self.subTest(framing=framing):
+                name = f"photo-{framing}.jpg"
+                conn = self.connection()
+                status, _ = self.post(conn, "/Ask", plistlib.dumps({
+                    "SenderComputerName": "iPhone", "SenderModelName": "iPhone",
+                    "Files": [{"FileName": name, "FileType": "public.jpeg"}],
+                }, fmt=plistlib.FMT_BINARY))
+                self.assertEqual(status, 200)
+                status, _ = self.post(conn, "/Upload", encode([(name, b"jpeg bytes")]),
+                                      {"Content-Type": "application/x-cpio",
+                                       "TransferID": framing, "Expect": "100-continue"})
+                self.assertEqual(status, 200)
+                self.assertEqual((self.out / name).read_bytes(), b"jpeg bytes")
+
+    def test_an_upload_of_another_content_type_is_refused(self):
+        status, _ = self.post(self.connection(), "/Upload", dvzip([("x.txt", b"x")]),
+                              {"Content-Type": "application/octet-stream", "TransferID": "T2"})
+        self.assertEqual(status, 415)
+        self.assertFalse((self.out / "x.txt").exists())
 
     def test_everyone_mode_serves_a_sender_presenting_a_self_signed_certificate(self):
         # Asking for a certificate would verify it, and a sender whose

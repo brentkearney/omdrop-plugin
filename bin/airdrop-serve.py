@@ -647,7 +647,9 @@ class Handler(BaseHTTPRequestHandler):
       swapped-out rfile once made the keep-alive loop see EOF.
     - /Upload arrives as application/x-dvzip, not the plain x-cpio older
       AirDrop implementations take (answering 406 to it makes the sender
-      report a failed transfer). Decode it.
+      report a failed transfer). Decode it. Older iOS still sends x-cpio
+      (seen from iOS 16): its compressed body decodes to the same CPIO
+      archive, and refusing it failed every transfer from that phone.
     Anything else POSTed is answered 400, GET and HEAD a bare 200, and every
     other method the stock 501.
     """
@@ -886,7 +888,7 @@ class Handler(BaseHTTPRequestHandler):
             self.reject(403, 'contacts-only upload has no accepted Ask')
             return
         ctype = self.headers.get('Content-Type', '').split(';')[0].strip().lower()
-        if ctype != 'application/x-dvzip':
+        if ctype not in ('application/x-dvzip', 'application/x-cpio'):
             self.reject(415, f'unsupported Content-Type {ctype!r}')
             return
         if not UPLOAD_SLOTS.acquire(blocking=False):
