@@ -103,6 +103,35 @@ In `omdrop peers -n` output, `(no response)` means nothing answered on the AirDr
 
 `omdrop skill install` links a skill that tells AI agents how to use `omdrop`, as `omdrop` in each of `~/.agents/skills`, `~/.claude/skills`, `~/.codex/skills`, and `~/.pi/agent/skills` that exists. Nothing installs it for you: `omdrop setup` only says how, and `omdrop on` never touches it. An existing `omdrop` entry is replaced only when it is a dangling link or a link into a plugin's `skills/omdrop`. `omdrop skill remove` removes those links, and they stay removed.
 
+## Send from Strata
+
+To add **OmDrop…** to [Strata](https://github.com/lgse/strata)'s file context menu:
+
+```bash
+omdrop strata install
+```
+
+The device picker needs GTK 4 and Python GObject bindings (`python-gobject` on Arch).
+Right-click one or more local files, choose **OmDrop…**, pick a nearby Apple device,
+and click **Send**. If Omdrop is off, the action turns it on for 10 minutes using
+its saved visibility setting. On iPhone, enable Everyone for 10 Minutes and keep
+Photos → Share → AirDrop open; accept the transfer when prompted.
+
+The action supports Strata's [custom-actions protocol 1](https://github.com/lgse/strata/blob/main/docs/custom-actions.md).
+It reads the whole selection without shell interpolation, rejects folders and
+unreadable files, and refuses duplicate filenames. Compress folders first. Web
+shortcut files follow `omdrop send`'s link handling; send links and files separately.
+The device list is fetched after clicking the action. A device that disappears or
+changes its address before Send must be selected again. Transfer errors and
+recipient declines appear in Strata's Jobs → Details; cancellation sends nothing
+if you cancel the picker, and Jobs can stop an ongoing discovery or send.
+
+`omdrop strata remove` removes the action. Both commands preserve existing or
+edited actions. Install can update a previous unedited Omdrop action; it writes
+regular files under `$XDG_CONFIG_HOME/strata/actions/omdrop` (default `~/.config`).
+Run remove before uninstalling the plugin. Installation is optional; `omdrop setup`
+does not change Strata's settings.
+
 ## Contacts Only
 
 To accept files only from people you choose:
@@ -195,6 +224,7 @@ Protocol dumps for bug reports are off by default. `omdrop send --verbose` write
 omdrop firewall remove
 omdrop links remove
 omdrop skill remove
+omdrop strata remove
 omarchy plugin remove netmojo.omdrop
 sudo pacman -R brcmfmac-awdl-dkms   # the radio backend on a Mac; omdrop-owl on a PC
 omdrop identity lock                # clear a cached identity

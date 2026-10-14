@@ -215,6 +215,7 @@ omdrop -- send and receive files with nearby Apple devices
   links ACTION      install or remove the double-click handler for received
                     .url and .webloc links
   open-link FILE    open a .url or .webloc link in the browser (web links only)
+  strata ACTION     install or remove the Strata file context-menu action
   skill ACTION      install or remove the skill that tells AI agents how to
                     use omdrop (nothing else installs it)
   version           the plugin version, for bug reports
@@ -2858,6 +2859,7 @@ case "${1:-status}" in
   setup)  shift; cmd_setup "$@" ;;
   doctor) shift; cmd_doctor "$@" ;;
   links)  shift; cmd_links "$@" ;;
+  strata) shift; python3 "$PROJ/bin/strata-action.py" "$@" ;;
   skill|skills) shift; cmd_skill "$@" ;;
   open-link) shift; cmd_open_link "$@" ;;
   install-driver) shift; cmd_install_driver ;;

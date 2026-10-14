@@ -1,0 +1,18 @@
+schema_version = 1
+id = "omdrop"
+name = "OmDrop…"
+description = "Send the selected files to a nearby Apple device."
+icon = "globe"
+enabled = true
+menu = "top"
+
+[when]
+kinds = ["file"]
+min_items = 1
+
+[run]
+runtime = "python"
+entrypoint = "run.py"
+mode = "whole-selection"
+working_directory = "parent"
+confirm = false
