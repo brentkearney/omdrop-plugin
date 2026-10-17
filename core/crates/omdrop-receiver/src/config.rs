@@ -126,9 +126,11 @@ pub fn load(path: &Path) -> Result<FileConfig, String> {
         cfg.max_receive_percent = Some(validate_receive_percent(percent)?);
     }
     if let Some(value) = table.get("compact_tls") {
-        cfg.compact_tls = Some(value.as_bool().ok_or_else(|| {
-            format!("{shown}: compact_tls must be a boolean")
-        })?);
+        cfg.compact_tls = Some(
+            value
+                .as_bool()
+                .ok_or_else(|| format!("{shown}: compact_tls must be a boolean"))?,
+        );
     }
     Ok(cfg)
 }

@@ -7,9 +7,13 @@ For the Rust receiver in omdrop-core, add this **boolean** to the existing
 compact_tls = true
 ```
 
-Restart `airdrop-receiver.service` with `systemctl --user restart
-airdrop-receiver.service` while a receiving window is active. Configuration
-is read on receiver startup. Delete the key, or set it to `false`, then restart
+While a receiving window is active, restart the receiver:
+
+```bash
+systemctl --user restart airdrop-receiver.service
+```
+
+Configuration is read on receiver startup. Delete the key, or set it to `false`, then restart
 to restore default group selection. Keep the other configuration keys intact.
 No systemd override, fixed installation path, CLI flag or identity migration
 is required. The Python fallback does not support this setting and rejects

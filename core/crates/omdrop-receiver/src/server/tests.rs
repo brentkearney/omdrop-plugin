@@ -149,12 +149,9 @@ fn start_with_transport(
     } else {
         tls::ClientAuth::None
     };
-    let config = tls::server_config_with_compact_tls(
-        &receiver,
-        auth,
-        cfg.compact_tls.unwrap_or(false),
-    )
-    .unwrap();
+    let config =
+        tls::server_config_with_compact_tls(&receiver, auth, cfg.compact_tls.unwrap_or(false))
+            .unwrap();
     let (receiver_der, _) = tls::certified_key(&receiver).unwrap();
     let (chain, _) = tls::certified_key(&sender).unwrap();
     let apple = FakeApple {
@@ -208,7 +205,11 @@ fn compact_tls_rejects_p256_only_peers_but_defaults_accept_them() {
             let mut c = transport_client(&fx, rustls::crypto::ring::kx_group::SECP256R1, version);
             let io = c.get_mut();
             let result = io.conn.complete_io(&mut io.sock);
-            assert_eq!(result.is_err(), config.contains("true"), "{config} {version:?}");
+            assert_eq!(
+                result.is_err(),
+                config.contains("true"),
+                "{config} {version:?}"
+            );
         }
     }
 }
