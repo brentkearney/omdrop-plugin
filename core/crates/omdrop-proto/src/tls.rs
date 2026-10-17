@@ -90,7 +90,23 @@ pub fn server_config(
     identity: &Identity,
     client_auth: ClientAuth,
 ) -> Result<Arc<ServerConfig>, TlsError> {
-    let provider = provider();
+    server_config_with_compact_tls(identity, client_auth, false)
+}
+
+/// Restrict receiver key exchange to X25519 when explicitly requested.
+/// This excludes P-256/P-384 peers. Ring already prefers X25519 and has no
+/// post-quantum groups, so this is not a handshake-size improvement over the
+/// current default provider for a peer offering X25519.
+pub fn server_config_with_compact_tls(
+    identity: &Identity,
+    client_auth: ClientAuth,
+    compact_tls: bool,
+) -> Result<Arc<ServerConfig>, TlsError> {
+    let mut provider = rustls::crypto::ring::default_provider();
+    if compact_tls {
+        provider.kx_groups = vec![rustls::crypto::ring::kx_group::X25519];
+    }
+    let provider = Arc::new(provider);
     let (chain, key) = certified_key(identity)?;
     let builder = ServerConfig::builder_with_provider(provider.clone())
         .with_safe_default_protocol_versions()
