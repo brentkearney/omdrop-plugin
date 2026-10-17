@@ -46,7 +46,7 @@ const BACKEND_CONTRACT_MIN: &str = "0.7.0";
 /// Item IDs Omdrop reports itself, and the panel acts on. A backend's own
 /// item under one of these names is passed on as backend-<id>, so its
 /// sentence still shows but no button offers a fix that cannot fix it.
-const PLUGIN_ITEM_IDS: [&str; 3] = ["driver", "library", "service"];
+const PLUGIN_ITEM_IDS: [&str; 4] = ["driver", "library", "service", "firewall"];
 /// A probe is a few hundred bytes; anything past this is not an answer.
 const PROBE_MAX: usize = 1 << 20;
 
@@ -633,6 +633,7 @@ pub fn prereqs_missing() -> Vec<(String, String)> {
                 ));
             }
             missing.extend(service_missing());
+            missing.extend(firewall_item());
             return missing;
         }
         Probe::None => {}
@@ -660,6 +661,7 @@ pub fn prereqs_missing() -> Vec<(String, String)> {
         ));
     }
     missing.extend(service_missing());
+    missing.extend(firewall_item());
     missing
 }
 
@@ -725,6 +727,50 @@ pub fn cmd_doctor(args: &[String]) -> i32 {
 
 fn ufw_active() -> bool {
     have("ufw") && run_quiet("systemctl", &["is-active", "--quiet", "ufw.service"]) == 0
+}
+
+/// UFW keeps each rule in its rules file as a `### tuple ###` line, which
+/// unlike `ufw status` takes no root to read. Ours, as `ufw` writes it,
+/// followed by its comment.
+const UFW_TUPLE: &str = "### tuple ### allow tcp 8771 fe80::/10 any fe80::/10 in_awdl0";
+
+/// /etc/ufw, or OMDROP_UFW_DIR in the tests.
+fn ufw_dir() -> String {
+    env_nonempty("OMDROP_UFW_DIR").unwrap_or_else(|| "/etc/ufw".to_string())
+}
+
+/// Whether the rule is in UFW's rules; `None` when the file can't be read.
+fn ufw_rule_present() -> Option<bool> {
+    let rules = std::fs::read_to_string(format!("{}/user6.rules", ufw_dir())).ok()?;
+    Some(rules.lines().any(|line| {
+        line.strip_prefix(UFW_TUPLE)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
+    }))
+}
+
+/// A blocker only when it certainly is one: UFW on and enforcing, and its
+/// rules readable and without ours. ufw.service stays active after
+/// `ufw disable`, which only sets ENABLED=no, so that is checked too.
+fn firewall_missing() -> bool {
+    ufw_active()
+        && std::fs::read_to_string(format!("{}/ufw.conf", ufw_dir()))
+            .is_ok_and(|conf| conf.lines().any(|l| l == "ENABLED=yes"))
+        && ufw_rule_present() == Some(false)
+}
+
+/// Whether install-driver adds the rule: whenever UFW is active and the rule
+/// isn't known to be there. `ufw allow` skips a rule it already has.
+fn firewall_needed() -> bool {
+    ufw_active() && ufw_rule_present() != Some(true)
+}
+
+fn firewall_item() -> Option<(String, String)> {
+    firewall_missing().then(|| {
+        (
+            "firewall".to_string(),
+            "UFW is blocking AirDrop: Apple devices can find this computer but not connect to its receiver. The button below adds the one rule it needs.".to_string(),
+        )
+    })
 }
 
 /// The DKMS package deliberately does not own this rule: it supplies a radio
@@ -823,9 +869,8 @@ pub fn cmd_install_driver() -> i32 {
     let helper = is_executable(&c.discoverable);
     if helper && driver_current() && receiver_libs_installed() {
         // The firewall rule is still Omdrop's to add, as install_for_backend
-        // adds it. Whether it is already there takes root to read, and
-        // `ufw allow` skips a rule it already has.
-        if ufw_active() {
+        // adds it.
+        if firewall_needed() {
             return install_firewall(&build_script(&self_q, false, false, false, true));
         }
         outln!(
@@ -846,7 +891,7 @@ pub fn cmd_install_driver() -> i32 {
         libs_missing,
         driver_needed,
         repo_has_driver,
-        ufw_active(),
+        firewall_needed(),
     );
     const INTRO: &str = "Omdrop requires a patched wifi driver, which requires administrative privilege to install. You will be prompted for your password.";
     if !have(LAUNCHER) {
@@ -896,7 +941,7 @@ fn install_for_backend(self_q: &str) -> i32 {
         !receiver_libs_installed(),
         false,
         false,
-        ufw_active(),
+        firewall_needed(),
     );
     if build == "set -e" {
         outln!(
