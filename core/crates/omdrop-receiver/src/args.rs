@@ -46,7 +46,7 @@ pub fn usage() -> String {
 
 pub fn help(config_path: &str) -> String {
     format!(
-        "{}\n\nAirDrop receiver. Config: {config_path} (name, model, download_dir,\nmax_receive_percent); flags override.\n\n\
+        "{}\n\nAirDrop receiver. Config: {config_path} (name, model, download_dir,\nmax_receive_percent, compact_tls); flags override.\n\n\
 options:\n  -h, --help            show this help message and exit\n  --iface IFACE\n  --port PORT\n  \
 --name NAME           ReceiverComputerName: the label under the tile in the Mac\n                        sheet (config: name)\n  \
 --model MODEL         ReceiverModelName: Apple model identifier; picks the\n                        device glyph the sheet draws (config: model)\n  \

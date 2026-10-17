@@ -283,7 +283,11 @@ fn run() -> i32 {
     } else {
         tls::ClientAuth::None
     };
-    let tls_config = match tls::server_config(&identity, client_auth) {
+    let tls_config = match tls::server_config_with_compact_tls(
+        &identity,
+        client_auth,
+        cfg.compact_tls.unwrap_or(false),
+    ) {
         Ok(c) => c,
         Err(e) => return fail(format!("no usable identity: {e}")),
     };

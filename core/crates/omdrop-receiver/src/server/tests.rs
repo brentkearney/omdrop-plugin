@@ -83,6 +83,7 @@ struct Fixture {
     root: tempfile::TempDir,
     sender: Identity,
     server: Arc<Server>,
+    receiver_der: Vec<CertificateDer<'static>>,
 }
 
 impl Fixture {
@@ -101,7 +102,18 @@ impl Fixture {
 }
 
 fn start(contacts_only: bool, tweak: impl FnOnce(&mut Settings)) -> Fixture {
+    start_with_transport(contacts_only, tweak, "")
+}
+
+fn start_with_transport(
+    contacts_only: bool,
+    tweak: impl FnOnce(&mut Settings),
+    config_text: &str,
+) -> Fixture {
     let root = tempfile::tempdir().unwrap();
+    let config_path = root.path().join("config.toml");
+    std::fs::write(&config_path, config_text).unwrap();
+    let cfg = crate::config::load(&config_path).unwrap();
     std::fs::create_dir(root.path().join("out")).unwrap();
     let visibility_path = root.path().join("visibility");
     std::fs::write(
@@ -137,7 +149,10 @@ fn start(contacts_only: bool, tweak: impl FnOnce(&mut Settings)) -> Fixture {
     } else {
         tls::ClientAuth::None
     };
-    let config = tls::server_config(&receiver, auth).unwrap();
+    let config =
+        tls::server_config_with_compact_tls(&receiver, auth, cfg.compact_tls.unwrap_or(false))
+            .unwrap();
+    let (receiver_der, _) = tls::certified_key(&receiver).unwrap();
     let (chain, _) = tls::certified_key(&sender).unwrap();
     let apple = FakeApple {
         sender_der: chain[0].as_ref().to_vec(),
@@ -152,10 +167,76 @@ fn start(contacts_only: bool, tweak: impl FnOnce(&mut Settings)) -> Fixture {
         root,
         sender,
         server,
+        receiver_der,
     }
 }
 
 type Client = BufReader<StreamOwned<ClientConnection, TcpStream>>;
+
+fn transport_client(
+    fx: &Fixture,
+    group: &'static dyn rustls::crypto::SupportedKxGroup,
+    version: &'static rustls::SupportedProtocolVersion,
+) -> Client {
+    let mut provider = rustls::crypto::ring::default_provider();
+    provider.kx_groups = vec![group];
+    let config = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
+        .with_protocol_versions(&[version])
+        .unwrap()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(AnyServer))
+        .with_no_client_auth();
+    let sock = TcpStream::connect((Ipv6Addr::LOCALHOST, fx.port)).unwrap();
+    sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    sock.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+    let conn = ClientConnection::new(
+        Arc::new(config),
+        ServerName::IpAddress(Ipv6Addr::LOCALHOST.into()),
+    )
+    .unwrap();
+    BufReader::new(StreamOwned::new(conn, sock))
+}
+
+#[test]
+fn compact_tls_rejects_p256_only_peers_but_defaults_accept_them() {
+    for config in ["", "compact_tls = false\n", "compact_tls = true\n"] {
+        let fx = start_with_transport(false, |_| {}, config);
+        for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
+            let mut c = transport_client(&fx, rustls::crypto::ring::kx_group::SECP256R1, version);
+            let io = c.get_mut();
+            let result = io.conn.complete_io(&mut io.sock);
+            assert_eq!(
+                result.is_err(),
+                config.contains("true"),
+                "{config} {version:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn compact_tls_uploads_over_tls12_and_tls13_with_the_existing_identity() {
+    let fx = start_with_transport(false, |_| {}, "compact_tls = true\n");
+    let mut payload = vec![0u8; 256 * 1024];
+    std::fs::File::open("/dev/urandom")
+        .unwrap()
+        .read_exact(&mut payload)
+        .unwrap();
+    for (i, version) in [&rustls::version::TLS12, &rustls::version::TLS13]
+        .into_iter()
+        .enumerate()
+    {
+        let mut c = transport_client(&fx, rustls::crypto::ring::kx_group::X25519, version);
+        let name = format!("constrained-{i}.bin");
+        assert_eq!(upload(&mut c, &dvzip(&[(&name, &payload)])), 200);
+        assert_eq!(std::fs::read(fx.dest().join(name)).unwrap(), payload);
+        assert_eq!(
+            c.get_ref().conn.peer_certificates().unwrap(),
+            fx.receiver_der.as_slice()
+        );
+        assert_eq!(c.get_ref().conn.protocol_version(), Some(version.version));
+    }
+}
 
 /// A client presenting the sender's certificate, or none at all.
 fn connect(fx: &Fixture, with_cert: bool) -> Client {

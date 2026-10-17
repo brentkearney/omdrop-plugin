@@ -12,7 +12,13 @@ use std::path::{Component, Path, PathBuf};
 
 use omdrop_proto::archive::{is_unsafe_char, py_repr};
 
-pub const CONFIG_KEYS: [&str; 4] = ["name", "model", "download_dir", "max_receive_percent"];
+pub const CONFIG_KEYS: [&str; 5] = [
+    "name",
+    "model",
+    "download_dir",
+    "max_receive_percent",
+    "compact_tls",
+];
 const STRING_CONFIG_KEYS: [&str; 3] = ["name", "model", "download_dir"];
 pub const DEFAULT_MAX_RECEIVE_PERCENT: i64 = 30;
 pub const DEFAULT_MODEL: &str = "MacBookPro18,3";
@@ -20,6 +26,7 @@ pub const DEFAULT_MODEL: &str = "MacBookPro18,3";
 /// What config.toml says, validated.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FileConfig {
+    pub compact_tls: Option<bool>,
     pub name: Option<String>,
     pub model: Option<String>,
     pub download_dir: Option<String>,
@@ -31,6 +38,9 @@ impl FileConfig {
     /// `absent (defaults)` for an absent or empty file.
     pub fn summary(&self) -> String {
         let mut parts = Vec::new();
+        if let Some(compact) = self.compact_tls {
+            parts.push(format!("compact_tls={compact}"));
+        }
         if let Some(d) = &self.download_dir {
             parts.push(format!("download_dir={}", py_repr(d)));
         }
@@ -114,6 +124,13 @@ pub fn load(path: &Path) -> Result<FileConfig, String> {
             return Err(percent_error());
         };
         cfg.max_receive_percent = Some(validate_receive_percent(percent)?);
+    }
+    if let Some(value) = table.get("compact_tls") {
+        cfg.compact_tls = Some(
+            value
+                .as_bool()
+                .ok_or_else(|| format!("{shown}: compact_tls must be a boolean"))?,
+        );
     }
     Ok(cfg)
 }
@@ -306,6 +323,22 @@ mod tests {
     }
 
     #[test]
+    fn compact_tls_requires_a_boolean_and_defaults_to_disabled() {
+        assert_eq!(load_text("").unwrap().compact_tls, None);
+        for enabled in [false, true] {
+            let cfg = load_text(&format!("compact_tls = {enabled}\n")).unwrap();
+            assert_eq!(cfg.compact_tls, Some(enabled));
+            assert_eq!(cfg.summary(), format!("compact_tls={enabled}"));
+        }
+        for value in ["1", "0", "\"true\"", "[]", "{}"] {
+            assert_eq!(
+                load_text(&format!("compact_tls = {value}\n")).unwrap_err(),
+                "PATH: compact_tls must be a boolean"
+            );
+        }
+    }
+
+    #[test]
     fn bad_values_refuse_the_start_with_the_python_messages() {
         let percent = "max_receive_percent must be an integer from 1 to 90";
         for (text, want) in [
@@ -316,7 +349,7 @@ mod tests {
             ("max_receive_percent = 0\n", percent),
             (
                 "nmae = \"x\"\nzz = 1\n",
-                "PATH: unknown key(s) nmae, zz; known: name, model, download_dir, max_receive_percent",
+                "PATH: unknown key(s) nmae, zz; known: name, model, download_dir, max_receive_percent, compact_tls",
             ),
             ("name = \"  \"\n", "PATH: name must be a non-empty string"),
             ("model = 3\n", "PATH: model must be a non-empty string"),
