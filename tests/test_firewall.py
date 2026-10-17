@@ -34,13 +34,17 @@ class UfwFixture(unittest.TestCase):
             OMDROP_DISCOVERABLE="/bin/sh",
             OMDROP_SYSFS=apple_wifi_sysfs(self.tmp.name),
         )
-        # UFW's own files are this test's, not the machine's: ufw.conf
-        # enforcing, and no rules file, so whether the rule is there can't be
-        # told until a test writes one.
-        self.ufw = Path(self.tmp.name) / "ufw"
-        self.ufw.mkdir()
+        # UFW's own files are this test's, not the machine's: enforcing,
+        # dropping incoming traffic by default, and no rules file, so whether
+        # the rule is there can't be told until a test writes one.
+        etc = Path(self.tmp.name) / "etc"
+        self.ufw = etc / "ufw"
+        self.ufw.mkdir(parents=True)
+        (etc / "default").mkdir()
+        self.policy = etc / "default" / "ufw"
+        self.policy.write_text('IPV6=yes\nDEFAULT_INPUT_POLICY="DROP"\n')
         (self.ufw / "ufw.conf").write_text("ENABLED=yes\nLOGLEVEL=low\n")
-        self.env["OMDROP_UFW_DIR"] = str(self.ufw)
+        self.env["OMDROP_UFW_ETC"] = str(etc)
         self.command(
             "systemctl",
             """#!/bin/sh
@@ -182,6 +186,11 @@ class FirewallReadinessTests(UfwFixture):
         cases = {
             "the rule is there": lambda: self.rules(SSH_TUPLE, RECEIVER_TUPLE),
             "the rules can't be read": lambda: None,
+            "the default policy can't be read": lambda: (
+                self.rules(SSH_TUPLE), self.policy.unlink()),
+            "incoming traffic is accepted by default": lambda: (
+                self.rules(SSH_TUPLE),
+                self.policy.write_text('DEFAULT_INPUT_POLICY="ACCEPT"\n')),
             "ufw is disabled": lambda: (
                 self.rules(SSH_TUPLE),
                 (self.ufw / "ufw.conf").write_text("ENABLED=no\n")),
@@ -192,13 +201,28 @@ class FirewallReadinessTests(UfwFixture):
             with self.subTest(name):
                 (self.ufw / "user6.rules").unlink(missing_ok=True)
                 (self.ufw / "ufw.conf").write_text("ENABLED=yes\n")
+                self.policy.write_text('DEFAULT_INPUT_POLICY="DROP"\n')
                 self.env.pop("SYSTEMCTL_RC", None)
                 arrange()
                 self.assertNotIn("firewall", self.ids())
 
-    def test_a_rule_for_another_port_or_interface_is_not_the_receivers(self):
+    def test_a_broader_rule_that_admits_the_receiver_is_enough(self):
+        for broader in ("### tuple ### allow tcp 8771 ::/0 any ::/0 in",
+                        "### tuple ### allow any any ::/0 any ::/0 in_awdl0",
+                        "### tuple ### allow tcp 8000:9000 ::/0 any ::/0 in",
+                        "### tuple ### allow tcp 80,443,8771 ::/0 any ::/0 in",
+                        "### tuple ### limit tcp 8771 ::/0 any ::/0 in",
+                        "### tuple ### allow_log tcp 8771 ::/0 any ::/0 in"):
+            with self.subTest(broader):
+                self.rules(SSH_TUPLE, broader)
+                self.assertNotIn("firewall", self.ids())
+
+    def test_a_rule_that_cant_admit_the_receiver_doesnt_count(self):
         for other in (RECEIVER_TUPLE.replace(" 8771 ", " 87710 "),
+                      RECEIVER_TUPLE.replace(" 8771 ", " 8772:9000 "),
                       RECEIVER_TUPLE.replace("in_awdl0", "in_awdl01"),
+                      RECEIVER_TUPLE.replace("in_awdl0", "out_awdl0"),
+                      RECEIVER_TUPLE.replace(" tcp ", " udp "),
                       RECEIVER_TUPLE.replace("allow", "deny")):
             with self.subTest(other):
                 self.rules(other)

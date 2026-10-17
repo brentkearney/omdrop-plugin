@@ -1147,13 +1147,13 @@ ufw_active() {
 # UFW keeps each rule in its rules file as a `### tuple ###` line, which
 # unlike `ufw status` takes no root to read. Ours, as `ufw` writes it:
 #   ### tuple ### allow tcp 8771 fe80::/10 any fe80::/10 in_awdl0 comment=…
-# OMDROP_UFW_DIR stands in for /etc/ufw in the tests.
+# OMDROP_UFW_ETC stands in for /etc in the tests.
 UFW_TUPLE='### tuple ### allow tcp 8771 fe80::/10 any fe80::/10 in_awdl0'
 
-# Whether the rule is in UFW's rules: present, absent, or unknown when the
+# Whether our rule is in UFW's rules: present, absent, or unknown when the
 # file can't be read.
 ufw_rule_state() {
-  local rules="${OMDROP_UFW_DIR:-/etc/ufw}/user6.rules" rc=0
+  local rules="${OMDROP_UFW_ETC:-/etc}/ufw/user6.rules" rc=0
   [[ -r "$rules" ]] || { echo unknown; return 0; }
   grep -qE "^${UFW_TUPLE}( |\$)" "$rules" || rc=$?
   case $rc in
@@ -1163,13 +1163,51 @@ ufw_rule_state() {
   esac
 }
 
-# A blocker only when it certainly is one: UFW on and enforcing, and its rules
-# readable and without ours. ufw.service stays active after `ufw disable`,
-# which only sets ENABLED=no, so that is checked too.
+# Whether UFW lets senders reach the receiver: yes, no, or unknown when its
+# files can't be read. Yes when incoming traffic isn't dropped by default, or
+# when any allow (or limit) rule could admit TCP 8771 on awdl0: ours, or a
+# broader one such as `ufw allow 8771/tcp` or `ufw allow in on awdl0`. Rule
+# addresses aren't compared, so a rule that might match counts as one that
+# does: a false "blocked" would send someone to fix a working receiver.
+ufw_admits_receiver() {
+  UFW_ETC="${OMDROP_UFW_ETC:-/etc}" python3 -c '
+import os, re, sys
+etc = os.environ["UFW_ETC"]
+try:
+    policy = open(etc + "/default/ufw").read()
+    rules = open(etc + "/ufw/user6.rules").read()
+except OSError:
+    sys.exit(print("unknown"))
+m = re.search(r"^DEFAULT_INPUT_POLICY=\"?([A-Z]+)\"?\s*$", policy, re.M)
+if not m:
+    sys.exit(print("unknown"))
+if m.group(1) not in ("DROP", "REJECT"):
+    sys.exit(print("yes"))
+def covers(ports):
+    for p in ports.split(","):
+        lo, _, hi = p.partition(":")
+        hi = hi or lo
+        if p == "any" or (lo.isdigit() and hi.isdigit() and int(lo) <= 8771 <= int(hi)):
+            return True
+    return False
+for line in rules.splitlines():
+    if not line.startswith("### tuple ### "):
+        continue
+    # action proto dport dst sport src [dapp sapp] direction[_iface]
+    f = line[14:].split(" comment=")[0].split()
+    if (len(f) in (7, 9) and f[0].split("_")[0] in ("allow", "limit")
+            and f[1] in ("tcp", "any") and covers(f[2]) and f[-1] in ("in", "in_awdl0")):
+        sys.exit(print("yes"))
+print("no")'
+}
+
+# A blocker only when it certainly is one: UFW on and enforcing, and nothing
+# in its rules admitting the receiver. ufw.service stays active after
+# `ufw disable`, which only sets ENABLED=no, so that is checked too.
 firewall_missing() {
   ufw_active \
-    && grep -qx 'ENABLED=yes' "${OMDROP_UFW_DIR:-/etc/ufw}/ufw.conf" 2>/dev/null \
-    && [[ "$(ufw_rule_state)" == absent ]]
+    && grep -qx 'ENABLED=yes' "${OMDROP_UFW_ETC:-/etc}/ufw/ufw.conf" 2>/dev/null \
+    && [[ "$(ufw_admits_receiver)" == no ]]
 }
 
 # Whether install-driver adds the rule: whenever UFW is active and the rule

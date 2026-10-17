@@ -734,28 +734,77 @@ fn ufw_active() -> bool {
 /// followed by its comment.
 const UFW_TUPLE: &str = "### tuple ### allow tcp 8771 fe80::/10 any fe80::/10 in_awdl0";
 
-/// /etc/ufw, or OMDROP_UFW_DIR in the tests.
-fn ufw_dir() -> String {
-    env_nonempty("OMDROP_UFW_DIR").unwrap_or_else(|| "/etc/ufw".to_string())
+/// /etc, or OMDROP_UFW_ETC in the tests.
+fn ufw_etc() -> String {
+    env_nonempty("OMDROP_UFW_ETC").unwrap_or_else(|| "/etc".to_string())
 }
 
-/// Whether the rule is in UFW's rules; `None` when the file can't be read.
+fn ufw_rules() -> Option<String> {
+    std::fs::read_to_string(format!("{}/ufw/user6.rules", ufw_etc())).ok()
+}
+
+/// Whether our rule is in UFW's rules; `None` when the file can't be read.
 fn ufw_rule_present() -> Option<bool> {
-    let rules = std::fs::read_to_string(format!("{}/user6.rules", ufw_dir())).ok()?;
-    Some(rules.lines().any(|line| {
+    Some(ufw_rules()?.lines().any(|line| {
         line.strip_prefix(UFW_TUPLE)
             .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
     }))
 }
 
-/// A blocker only when it certainly is one: UFW on and enforcing, and its
-/// rules readable and without ours. ufw.service stays active after
-/// `ufw disable`, which only sets ENABLED=no, so that is checked too.
+/// Whether a tuple's destination ports (`any`, or a list of ports and
+/// `lo:hi` ranges) include the receiver's.
+fn ports_cover_receiver(ports: &str) -> bool {
+    ports.split(',').any(|p| {
+        let (lo, hi) = p.split_once(':').unwrap_or((p, p));
+        p == "any"
+            || matches!((lo.parse::<u32>(), hi.parse::<u32>()), (Ok(lo), Ok(hi)) if lo <= 8771 && 8771 <= hi)
+    })
+}
+
+/// Whether UFW lets senders reach the receiver; `None` when its files can't
+/// be read. Yes when incoming traffic isn't dropped by default, or when any
+/// allow (or limit) rule could admit TCP 8771 on awdl0: ours, or a broader
+/// one such as `ufw allow 8771/tcp` or `ufw allow in on awdl0`. Rule
+/// addresses aren't compared, so a rule that might match counts as one that
+/// does: a false "blocked" would send someone to fix a working receiver.
+fn ufw_admits_receiver() -> Option<bool> {
+    let policy = std::fs::read_to_string(format!("{}/default/ufw", ufw_etc())).ok()?;
+    let rules = ufw_rules()?;
+    let input = policy.lines().find_map(|l| {
+        l.trim_end()
+            .strip_prefix("DEFAULT_INPUT_POLICY=")
+            .map(|v| v.trim_matches('"'))
+    })?;
+    if input != "DROP" && input != "REJECT" {
+        return Some(true);
+    }
+    Some(rules.lines().any(|line| {
+        let Some(tuple) = line.strip_prefix("### tuple ### ") else {
+            return false;
+        };
+        // action proto dport dst sport src [dapp sapp] direction[_iface]
+        let f: Vec<&str> = tuple
+            .split(" comment=")
+            .next()
+            .unwrap_or_default()
+            .split_whitespace()
+            .collect();
+        (f.len() == 7 || f.len() == 9)
+            && matches!(f[0].split('_').next(), Some("allow" | "limit"))
+            && matches!(f[1], "tcp" | "any")
+            && ports_cover_receiver(f[2])
+            && matches!(f[f.len() - 1], "in" | "in_awdl0")
+    }))
+}
+
+/// A blocker only when it certainly is one: UFW on and enforcing, and
+/// nothing in its rules admitting the receiver. ufw.service stays active
+/// after `ufw disable`, which only sets ENABLED=no, so that is checked too.
 fn firewall_missing() -> bool {
     ufw_active()
-        && std::fs::read_to_string(format!("{}/ufw.conf", ufw_dir()))
+        && std::fs::read_to_string(format!("{}/ufw/ufw.conf", ufw_etc()))
             .is_ok_and(|conf| conf.lines().any(|l| l == "ENABLED=yes"))
-        && ufw_rule_present() == Some(false)
+        && ufw_admits_receiver() == Some(false)
 }
 
 /// Whether install-driver adds the rule: whenever UFW is active and the rule

@@ -85,9 +85,9 @@ anything of a backend's. A backend's item under one of these IDs is shown as
 `backend-<id>`, without the button. Use your own IDs instead, such as `radio`.
 
 The plugin adds its own items after the backend's: `library` (the receiver's
-packages), `service` (the receiving service) and `firewall` (UFW is enforcing,
-and its rules lack the receiver's). It reports `backend` itself when the probe
-doesn't answer or the contract is too old.
+packages), `service` (the receiving service) and `firewall` (UFW drops
+incoming traffic and no rule admits the receiver's). It reports `backend`
+itself when the probe doesn't answer or the contract is too old.
 
 With any other probing backend, `omdrop install-driver` installs only what belongs to
 the plugin: the receiver's packages, and its firewall rule when ufw is active

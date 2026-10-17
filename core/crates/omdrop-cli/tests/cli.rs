@@ -1245,14 +1245,21 @@ impl Radio {
                 .join("bin/omarchy-launch-floating-terminal-with-presentation"),
             "#!/bin/sh\nprintf '%s\\n' \"$1\"\n",
         );
-        // UFW's own files are the test's: enforcing, and no rules file, so
-        // whether the rule is there can't be told until a test writes one.
-        let ufw = f.root.join("ufw");
-        std::fs::create_dir_all(&ufw).unwrap();
-        std::fs::write(ufw.join("ufw.conf"), "ENABLED=yes\nLOGLEVEL=low\n").unwrap();
+        // UFW's own files are the test's: enforcing, dropping incoming
+        // traffic by default, and no rules file, so whether the rule is there
+        // can't be told until a test writes one.
+        let etc = f.root.join("etc");
+        std::fs::create_dir_all(etc.join("ufw")).unwrap();
+        std::fs::create_dir_all(etc.join("default")).unwrap();
+        std::fs::write(etc.join("ufw/ufw.conf"), "ENABLED=yes\nLOGLEVEL=low\n").unwrap();
+        std::fs::write(
+            etc.join("default/ufw"),
+            "IPV6=yes\nDEFAULT_INPUT_POLICY=\"DROP\"\n",
+        )
+        .unwrap();
         let env = vec![
             ("OMDROP_SYSFS".to_string(), sys.display().to_string()),
-            ("OMDROP_UFW_DIR".to_string(), ufw.display().to_string()),
+            ("OMDROP_UFW_ETC".to_string(), etc.display().to_string()),
         ];
         Self { f, env }
     }
@@ -1877,7 +1884,7 @@ fn ufw_rules(r: &Radio, tuples: &[&str]) {
         text.push('\n');
     }
     text.push_str("COMMIT\n");
-    std::fs::write(r.f.root.join("ufw/user6.rules"), text).unwrap();
+    std::fs::write(r.f.root.join("etc/ufw/user6.rules"), text).unwrap();
 }
 
 /// A radio backend with nothing missing, and UFW on: the plugin's own items
@@ -1915,9 +1922,19 @@ fn the_firewall_is_reported_only_when_ufw_certainly_drops_the_receiver() {
     let rule_there = ready_owl_behind_ufw();
     ufw_rules(&rule_there, &[SSH_TUPLE, RECEIVER_TUPLE]);
     let unreadable = ready_owl_behind_ufw();
+    let no_policy = ready_owl_behind_ufw();
+    ufw_rules(&no_policy, &[SSH_TUPLE]);
+    std::fs::remove_file(no_policy.f.root.join("etc/default/ufw")).unwrap();
+    let accepting = ready_owl_behind_ufw();
+    ufw_rules(&accepting, &[SSH_TUPLE]);
+    std::fs::write(
+        accepting.f.root.join("etc/default/ufw"),
+        "DEFAULT_INPUT_POLICY=\"ACCEPT\"\n",
+    )
+    .unwrap();
     let disabled = ready_owl_behind_ufw();
     ufw_rules(&disabled, &[SSH_TUPLE]);
-    std::fs::write(disabled.f.root.join("ufw/ufw.conf"), "ENABLED=no\n").unwrap();
+    std::fs::write(disabled.f.root.join("etc/ufw/ufw.conf"), "ENABLED=no\n").unwrap();
     let inactive = Radio::new();
     inactive.helper(&backend_helper(Some(owl(serde_json::json!([])))));
     write_exec(&inactive.f.root.join("bin/ufw"), "#!/bin/sh\nexit 0\n");
@@ -1925,6 +1942,8 @@ fn the_firewall_is_reported_only_when_ufw_certainly_drops_the_receiver() {
     for (name, r) in [
         ("the rule is there", rule_there),
         ("the rules can't be read", unreadable),
+        ("the default policy can't be read", no_policy),
+        ("incoming traffic is accepted by default", accepting),
         ("ufw is disabled", disabled),
         ("ufw.service is inactive", inactive),
     ] {
@@ -1933,10 +1952,29 @@ fn the_firewall_is_reported_only_when_ufw_certainly_drops_the_receiver() {
 }
 
 #[test]
-fn a_rule_for_another_port_interface_or_action_is_not_the_receivers() {
+fn a_broader_rule_that_admits_the_receiver_is_enough() {
+    for broader in [
+        "### tuple ### allow tcp 8771 ::/0 any ::/0 in",
+        "### tuple ### allow any any ::/0 any ::/0 in_awdl0",
+        "### tuple ### allow tcp 8000:9000 ::/0 any ::/0 in",
+        "### tuple ### allow tcp 80,443,8771 ::/0 any ::/0 in",
+        "### tuple ### limit tcp 8771 ::/0 any ::/0 in",
+        "### tuple ### allow_log tcp 8771 ::/0 any ::/0 in",
+    ] {
+        let r = ready_owl_behind_ufw();
+        ufw_rules(&r, &[SSH_TUPLE, broader]);
+        assert!(!r.ids().contains(&"firewall".to_string()), "{broader}");
+    }
+}
+
+#[test]
+fn a_rule_that_cant_admit_the_receiver_doesnt_count() {
     for other in [
         RECEIVER_TUPLE.replace(" 8771 ", " 87710 "),
+        RECEIVER_TUPLE.replace(" 8771 ", " 8772:9000 "),
         RECEIVER_TUPLE.replace("in_awdl0", "in_awdl01"),
+        RECEIVER_TUPLE.replace("in_awdl0", "out_awdl0"),
+        RECEIVER_TUPLE.replace(" tcp ", " udp "),
         RECEIVER_TUPLE.replace("allow", "deny"),
     ] {
         let r = ready_owl_behind_ufw();
